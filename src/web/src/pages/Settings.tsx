@@ -445,7 +445,6 @@ export function Settings() {
           <PathRow label="配置文件" value={settings.data.paths.config_file} />
           <PathRow label="Workspaces" value={settings.data.paths.workspaces_dir} />
           <PathRow label="日志" value={settings.data.paths.logs_dir} />
-          <PathRow label="备份" value={settings.data.paths.backups_dir} />
           <PathRow label="运行时" value={settings.data.paths.runtime_dir} />
           <PathRow label="共享服务" value={settings.data.paths.services_dir} />
           <PathRow label="临时目录" value={settings.data.paths.tmp_dir} />

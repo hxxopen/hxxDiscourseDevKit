@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { api } from './client'
-import type { ServiceName, Task } from './types'
+import type { ExtensionKind, ServiceName, Task } from './types'
 
 export function isTerminalTask(status: Task['status']): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'canceled'
@@ -193,6 +193,15 @@ export function useBackups(workspaceId: string | null) {
     queryFn: () => api.backups(workspaceId as string),
     enabled: Boolean(workspaceId),
     refetchInterval: 15_000,
+  })
+}
+
+export function useExtensions(kind: ExtensionKind, workspaceId: string | null) {
+  return useQuery({
+    queryKey: ['extensions', kind, workspaceId],
+    queryFn: () => api.extensions(kind, workspaceId as string),
+    enabled: Boolean(workspaceId),
+    refetchInterval: 20_000,
   })
 }
 

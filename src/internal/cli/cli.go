@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/hxx/hxxDiscourseDevKit/internal/app"
+	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/version"
 )
 
@@ -85,6 +86,13 @@ func Main(args []string) int {
 			return 2
 		}
 		return cmdBackup(ctx, globals, rest[1], rest[2:])
+	case "plugin", "theme":
+		kind := extension.Kind(rest[0])
+		if len(rest) < 2 {
+			printExtensionUsage(os.Stderr, kind)
+			return 2
+		}
+		return cmdExtension(ctx, globals, kind, rest[1], rest[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "hxxddk: 未知命令 %q\n\n", rest[0])
 		printUsage(os.Stderr)
@@ -233,6 +241,8 @@ func printUsage(w io.Writer) {
   start | stop | restart [ws] 启动、停止或重启 Workspace 项目
   project ...                 源码、初始化、状态与日志
   backup ...                  创建、查看与恢复备份
+  plugin list|create ...      管理 Discourse 插件脚手架
+  theme list|create ...       管理 Discourse 主题脚手架
   daemon run                  在前台运行 devkitd
   service list|start|stop ... 管理 PostgreSQL 与 Redis
   runtime list|verify         查看 Runtime 组件矩阵

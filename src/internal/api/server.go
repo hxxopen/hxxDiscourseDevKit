@@ -13,6 +13,7 @@ import (
 	"github.com/hxx/hxxDiscourseDevKit/internal/backup"
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
+	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/httpx"
 	"github.com/hxx/hxxDiscourseDevKit/internal/project"
 	"github.com/hxx/hxxDiscourseDevKit/internal/runtime"
@@ -32,6 +33,7 @@ type Options struct {
 	Services    *service.Manager
 	Project     *project.Manager
 	Backups     *backup.Manager
+	Extensions  *extension.Manager
 	Tasks       *task.Manager
 	Diagnostics *diagnostics.Service
 	UI          fs.FS
@@ -135,6 +137,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	auth("POST /api/v1/workspaces/{id}/project/checkout", s.handleCheckoutProject)
 	auth("POST /api/v1/workspaces/{id}/project/init", s.handleInitProject)
 	auth("GET /api/v1/workspaces/{id}/project/status", s.handleProjectStatus)
+
+	auth("GET /api/v1/workspaces/{id}/plugins", s.handleListPlugins)
+	auth("POST /api/v1/workspaces/{id}/plugins", s.handleCreatePlugin)
+	auth("GET /api/v1/workspaces/{id}/themes", s.handleListThemes)
+	auth("POST /api/v1/workspaces/{id}/themes", s.handleCreateTheme)
 
 	auth("GET /api/v1/workspaces/{id}/backups", s.handleListBackups)
 	auth("POST /api/v1/workspaces/{id}/backups", s.handleCreateBackup)

@@ -1,0 +1,29 @@
+# Runtime / development data
+/src/.devkit/
+/src/bin/
+/dist/
+/out/
+
+# Go
+*.exe
+*.exe~
+*.test
+*.out
+coverage.*
+vendor/
+
+# Node
+/src/web/node_modules/
+/src/web/dist/
+/src/web/.vite/
+
+# Built UI is kept out of git; only the placeholder keeps go:embed happy.
+/src/internal/webembed/dist/*
+!/src/internal/webembed/dist/.keep
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

@@ -200,6 +200,25 @@ export function Field({
 export const inputClass =
   'w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/20'
 
+export function Detail({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3">
+      <p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p>
+      <p className={`mt-1 break-all text-sm text-slate-200 ${mono ? 'font-mono text-xs' : ''}`}>
+        {value}
+      </p>
+    </div>
+  )
+}
+
 export function ProgressBar({ value }: { value: number }) {
   const clamped = Math.max(0, Math.min(100, value))
   return (

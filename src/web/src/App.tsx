@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Layout, type Page } from './components/Layout'
+import { Backup } from './pages/Backup'
 import { Dashboard } from './pages/Dashboard'
 import { Diagnostics } from './pages/Diagnostics'
 import { Logs } from './pages/Logs'
+import { Plugins } from './pages/Plugins'
 import { Project } from './pages/Project'
 import { Runtime } from './pages/Runtime'
+import { Themes } from './pages/Themes'
 import { Services } from './pages/Services'
 import { Settings } from './pages/Settings'
 import { Workspaces } from './pages/Workspaces'
@@ -16,6 +19,15 @@ function parseHash(): Page {
   }
   if (hash.startsWith('project')) {
     return 'project'
+  }
+  if (hash.startsWith('plugins')) {
+    return 'plugins'
+  }
+  if (hash.startsWith('themes')) {
+    return 'themes'
+  }
+  if (hash.startsWith('backup')) {
+    return 'backup'
   }
   if (hash.startsWith('runtime')) {
     return 'runtime'
@@ -55,6 +67,9 @@ export default function App() {
       {page === 'dashboard' ? <Dashboard onNavigate={navigate} /> : null}
       {page === 'workspaces' ? <Workspaces /> : null}
       {page === 'project' ? <Project /> : null}
+      {page === 'plugins' ? <Plugins /> : null}
+      {page === 'themes' ? <Themes /> : null}
+      {page === 'backup' ? <Backup /> : null}
       {page === 'runtime' ? <Runtime /> : null}
       {page === 'services' ? <Services /> : null}
       {page === 'logs' ? <Logs /> : null}

@@ -467,6 +467,46 @@ export interface RestoreResult {
   rollback_kept: boolean
 }
 
+export type ExtensionKind = 'plugin' | 'theme'
+
+export interface ExtensionCheck {
+  name: string
+  ok: boolean
+  message?: string
+}
+
+export interface ExtensionItem {
+  kind: ExtensionKind
+  slug: string
+  name: string
+  about: string
+  version: string
+  authors: string
+  url?: string
+  path: string
+  has_metadata: boolean
+  file_count: number
+  modified_at: string
+}
+
+export interface ExtensionListing {
+  workspace_id: string
+  kind: ExtensionKind
+  root: string
+  source_installed: boolean
+  checks: ExtensionCheck[]
+  items: ExtensionItem[]
+  total: number
+}
+
+export interface ExtensionCreateInput {
+  name: string
+  slug?: string
+  about?: string
+  version?: string
+  authors?: string
+}
+
 export interface DevKitConfig {
   schema_version: number
   instance_id: string

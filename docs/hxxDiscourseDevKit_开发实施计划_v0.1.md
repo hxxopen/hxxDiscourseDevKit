@@ -1164,7 +1164,7 @@ var (
 
 ### 15.5 M4：完整管理 UI（预计 8–10 个工作日）
 
-> **实施状态（2026-11-27）**：已新增 Runtime / Logs / Settings 页面、日志聚合 API 与设置读写 API，管理 UI 接入 SSE 任务事件刷新；Backup 仍与 Project 同页。Plugins / Themes 页面依赖 M6 能力，尚未实现；i18n 结构化与 E2E 验收待补齐。`go test ./...`、`go vet ./...`、`npm run build` 通过。
+> **实施状态（2026-11-27）**：已新增 Runtime / Logs / Settings 页面、日志聚合 API 与设置读写 API，并将 Backup 拆分为独立页面（Workspace 选择、摘要、共享备份卡片）；管理 UI 接入 SSE 任务事件刷新；概览页补充活动 Workspace 的项目启停/重启与任务进度。Plugins / Themes 页面已基于 M6 基础能力实现（清单、元数据、脚手架创建），11 个页面全部可访问。新增守护进程 E2E 测试，覆盖会话/CSRF、SSE、Workspace 创建与删除、日志读取、设置 PATCH 与后台任务轮询。i18n 结构化与浏览器端 UI E2E 待补齐。`go test ./...`、`go vet ./...`、`npm run build` 通过。
 
 - Runtime、Services、Project、Diagnostics、Logs、Backup、Settings 页面；
 - SSE 实时任务与状态；
@@ -1196,6 +1196,8 @@ var (
 - 平台支持状态与测试记录一致（未验证不宣称支持）。
 
 ### 15.7 M6：开发者体验（预计 8–12 个工作日）
+
+> **实施状态（2026-11-27）**：已实现插件/主题基础能力：按 Workspace 列出插件（源码 `plugins/`）与主题（`data/themes/`），解析 `plugin.rb` / `about.json` 元数据，并提供经过名称、slug、长度与目录边界校验的脚手架创建；插件创建要求源码已安装。已接入管理 API、`hxxddk plugin|theme list|create` 与 Plugins / Themes 页面。启用/禁用、依赖检查、测试、打包与 Project Profile/模板机制尚未实现。
 
 - 插件开发：创建、依赖检查、测试、打包；
 - 主题开发：创建、预览、构建；

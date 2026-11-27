@@ -18,6 +18,7 @@ import (
 	"github.com/hxx/hxxDiscourseDevKit/internal/backup"
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
+	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/logging"
 	"github.com/hxx/hxxDiscourseDevKit/internal/platform"
 	"github.com/hxx/hxxDiscourseDevKit/internal/process"
@@ -124,6 +125,8 @@ func Run(ctx context.Context, opts Options) error {
 		})
 	backupManager := backup.New(paths, workspaces, serviceManager,
 		logProvider.Logger().With("module", "backup"))
+	extensionManager := extension.New(paths, workspaces,
+		logProvider.Logger().With("module", "extension"))
 
 	if err := workspaces.Reconcile(ctx); err != nil {
 		logger.Warn("workspace reconcile reported an error", "error", err)
@@ -159,6 +162,7 @@ func Run(ctx context.Context, opts Options) error {
 		Services:    serviceManager,
 		Project:     projectManager,
 		Backups:     backupManager,
+		Extensions:  extensionManager,
 		Tasks:       tasks,
 		Diagnostics: diag,
 		UI:          webembed.FS(),

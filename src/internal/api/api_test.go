@@ -17,6 +17,7 @@ import (
 	"github.com/hxx/hxxDiscourseDevKit/internal/api"
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
+	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/secret"
 	"github.com/hxx/hxxDiscourseDevKit/internal/task"
 	"github.com/hxx/hxxDiscourseDevKit/internal/workspace"
@@ -57,6 +58,7 @@ func newStack(t *testing.T) *stack {
 		BindHost:  "127.0.0.1",
 	})
 	diag := diagnostics.New(paths, cfg, workspaces, logger)
+	extensions := extension.New(paths, workspaces, logger)
 
 	ui := fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>DevKit Test UI</title>")},
@@ -67,6 +69,7 @@ func newStack(t *testing.T) *stack {
 		Config:      cfg,
 		Secrets:     secrets,
 		Workspaces:  workspaces,
+		Extensions:  extensions,
 		Tasks:       tasks,
 		Diagnostics: diag,
 		UI:          ui,

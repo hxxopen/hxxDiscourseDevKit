@@ -5,6 +5,9 @@ export type Page =
   | 'dashboard'
   | 'workspaces'
   | 'project'
+  | 'plugins'
+  | 'themes'
+  | 'backup'
   | 'runtime'
   | 'services'
   | 'logs'
@@ -14,7 +17,10 @@ export type Page =
 const navItems: Array<{ id: Page; label: string; hint: string }> = [
   { id: 'dashboard', label: '概览', hint: '运行状态与快捷入口' },
   { id: 'workspaces', label: 'Workspaces', hint: '隔离的开发容器' },
-  { id: 'project', label: '项目与备份', hint: '源码、进程与恢复' },
+  { id: 'project', label: '项目', hint: '源码、依赖与进程' },
+  { id: 'plugins', label: '插件', hint: 'Discourse 插件脚手架' },
+  { id: 'themes', label: '主题', hint: '主题脚手架与资源' },
+  { id: 'backup', label: '备份与恢复', hint: '快照、校验与恢复' },
   { id: 'runtime', label: '运行时', hint: '组件矩阵与验证' },
   { id: 'services', label: '服务', hint: 'PostgreSQL 与 Redis' },
   { id: 'logs', label: '日志', hint: 'DevKit、项目与服务日志' },
@@ -55,6 +61,31 @@ function NavIcon({ page }: { page: Page }) {
           <path d="M4 12h16" />
           <path d="M4 17h10" />
           <circle cx="18" cy="17" r="2" />
+        </svg>
+      )
+    case 'plugins':
+      return (
+        <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" {...common}>
+          <path d="M9 4h3.5a1.5 1.5 0 0 1 0 3H12v2.5a1.5 1.5 0 0 1 3 0V12h2.5a1.5 1.5 0 0 1 0 3H15v2.5a1.5 1.5 0 0 1-3 0V15H9.5A1.5 1.5 0 0 1 8 13.5V12H6.5a1.5 1.5 0 0 1 0-3H8V6.5A1.5 1.5 0 0 1 9.5 5Z" />
+          <path d="M4 4h2M18 20h2M20 4h-2M4 20h2" />
+        </svg>
+      )
+    case 'themes':
+      return (
+        <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" {...common}>
+          <path d="M12 3a9 9 0 1 0 0 18c1.4 0 2-1 2-2 0-1.5-1-1.7-1-3 0-1 .8-2 2-2h1.5A4.5 4.5 0 0 0 21 9.5C21 5.9 17 3 12 3Z" />
+          <circle cx="7.5" cy="10" r="1" />
+          <circle cx="10" cy="6.8" r="1" />
+          <circle cx="14.5" cy="6.8" r="1" />
+          <circle cx="17.2" cy="10" r="1" />
+        </svg>
+      )
+    case 'backup':
+      return (
+        <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" {...common}>
+          <path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5v-7Z" />
+          <path d="m4 8.5 8 4.5 8-4.5M12 13v7" />
+          <path d="M8 6.2v4.3M16 6.2v4.3" />
         </svg>
       )
     case 'runtime':
@@ -133,7 +164,7 @@ export function Layout({
             </div>
           </div>
 
-          <nav className="mt-8 space-y-1">
+          <nav className="mt-8 min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
             {navItems.map((item) => {
               const active = page === item.id
               return (

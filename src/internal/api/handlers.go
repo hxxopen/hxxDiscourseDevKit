@@ -80,8 +80,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			"services":   s.opts.Services != nil,
 			"project":    s.opts.Project != nil,
 			"backups":    s.opts.Backups != nil,
-			"plugins":    false,
-			"themes":     false,
+			"plugins":    s.opts.Extensions != nil,
+			"themes":     s.opts.Extensions != nil,
 		},
 	})
 }

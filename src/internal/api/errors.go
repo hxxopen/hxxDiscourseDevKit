@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/hxx/hxxDiscourseDevKit/internal/backup"
+	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/httpx"
 	"github.com/hxx/hxxDiscourseDevKit/internal/project"
 	"github.com/hxx/hxxDiscourseDevKit/internal/runtime"
@@ -89,6 +90,12 @@ func mapError(err error) error {
 		return httpx.Conflict("INSUFFICIENT_SPACE", err.Error())
 	case errors.Is(err, backup.ErrWorkspaceMismatch):
 		return httpx.Conflict("BACKUP_WORKSPACE_MISMATCH", err.Error())
+	case errors.Is(err, extension.ErrExists):
+		return httpx.Conflict("EXTENSION_EXISTS", err.Error())
+	case errors.Is(err, extension.ErrSourceMissing):
+		return httpx.Conflict("SOURCE_MISSING", err.Error())
+	case errors.Is(err, extension.ErrValidation):
+		return httpx.BadRequest("EXTENSION_VALIDATION_FAILED", err.Error())
 	default:
 		var apiErr *httpx.Error
 		if errors.As(err, &apiErr) {

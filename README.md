@@ -4,7 +4,7 @@ hxxDiscourseDevKit 是一个独立、通用、跨平台的 Discourse 开发环�
 
 ## 当前状态
 
-已实现 **M0–M3**，并完成 M4 的运行时、日志、设置页面与 SSE 实时刷新：
+已实现 **M0–M3**，并完成 M4 的运行时、日志、设置、独立备份页、SSE 实时刷新，以及 M6 的插件/主题基础能力：
 
 - 单守护进程 `devkitd` + 瘦 CLI `hxxddk`，CLI 可按需自动拉起守护进程；
 - 多 Workspace：独立目录、HTTP 端口、PostgreSQL 数据库/用户、随机凭据与 Redis DB 索引；
@@ -22,10 +22,13 @@ hxxDiscourseDevKit 是一个独立、通用、跨平台的 Discourse 开发环�
 - 日志中心：统一列出 DevKit 主日志、任务历史、Workspace 项目/初始化/Git 日志与托管服务日志，支持尾部读取、行数选择、自动刷新与返回前脱敏；
 - 设置页：修改管理 API 端口、运行时 Profile/矩阵/WSL 发行版、项目默认值、日志与更新策略；持久化后标出需要重启 devkitd 的字段；
 - SSE 事件流：后台任务状态变化时刷新 Workspace、服务、项目与备份缓存；
-- React 管理 UI（概览、Workspaces、项目与备份、运行时、服务、日志、诊断、设置），构建产物通过 `go:embed` 内嵌进二进制；
+- 概览页直接展示活动 Workspace 的项目运行状态，支持启动、停止、重启并显示任务进度；
+- 插件与主题：插件清单与脚手架创建（源码 `plugins/` 目录，要求 Discourse 源码已安装），主题清单与脚手架创建（Workspace `data/themes/`），解析 `plugin.rb` / `about.json` 元数据；提供管理 API、`hxxddk plugin|theme` 命令与独立页面；
+- React 管理 UI 共 11 个页面（概览、Workspaces、项目、插件、主题、备份与恢复、运行时、服务、日志、诊断、设置），构建产物通过 `go:embed` 内嵌进二进制；
+- 守护进程 E2E 测试：真实启动 `devkitd`，覆盖会话/CSRF、SSE、Workspace 创建与删除、日志读取、设置 PATCH 与后台任务轮询；
 - 结构化日志、敏感值脱敏、单实例文件锁、诊断报告与 JSONL 任务历史。
 
-M3 的真实 Discourse 仓库端到端验收（clone、bundle、启动与访问）仍需在目标机器上手动执行；M4 的 Plugins/Themes 页面依赖 M6 的插件/主题能力，操作审计、i18n 与 E2E 验收仍待补齐；平台安装包按 M5 继续。
+M3 的真实 Discourse 仓库端到端验收（clone、bundle、启动与访问）仍需在目标机器上手动执行；插件/主题目前覆盖清单与脚手架创建，启用/禁用、依赖检查、测试与打包仍属 M6 后续；操作审计、i18n 结构化与浏览器端 UI E2E 仍待补齐；平台安装包按 M5 继续。
 
 ## 环境要求
 
@@ -207,6 +210,27 @@ GET   /api/v1/events        # SSE，任务状态事件
 
 日志来源 ID 由守护进程生成并按精确匹配校验，客户端不能传入任意文件路径。
 
+### 插件与主题（M6 基础）
+
+插件位于 `<Workspace>/<源码路径>/plugins/<slug>`，遵循 Discourse 的加载约定；创建插件要求当前 Workspace 已安装 Discourse 源码。主题位于 `<Workspace>/data/themes/<slug>`，会随 Workspace 的 `data` 目录一起备份。两者都会生成可解析的元数据（插件 `plugin.rb` 头部注释、主题 `about.json`），并在页面与 CLI 中列出文件数、版本、作者与更新时间。
+
+```text
+GET  /api/v1/workspaces/{id}/plugins
+POST /api/v1/workspaces/{id}/plugins
+GET  /api/v1/workspaces/{id}/themes
+POST /api/v1/workspaces/{id}/themes
+```
+
+```bash
+# 列出与创建（未指定 --workspace 时使用活动 Workspace）
+./src/bin/hxxddk plugin list
+./src/bin/hxxddk plugin create "My Plugin" --about "..." --version 0.1.0
+./src/bin/hxxddk theme list
+./src/bin/hxxddk theme create "My Theme" --slug my-theme
+```
+
+插件创建后需要重启 Rails 开发服务器才会被 Discourse 加载；主题可配合 `discourse_theme watch .` 使用。
+
 ## 前端开发
 
 ```bash
@@ -277,5 +301,6 @@ workspaces/<ULID>/        每个 Workspace 的 source/config/logs/data/backups/t
 - **M0 + M1（已完成）**：实例、Workspace、API、CLI、管理 UI 与安全边界；
 - **M2（已完成）**：Runtime 组件、托管 PostgreSQL/Redis、数据库/角色隔离、外部服务、WSL2 桥接；
 - **M3（已完成）**：Git 源码、Discourse 初始化、项目启停与日志、备份恢复；
-- **M4（下一步）**：完整 GUI 管理、服务状态与操作审计；
-- **M5**：离线组件包、自动部署与发布流水线。
+- **M4（页面已齐）**：完整 GUI 管理、SSE 实时刷新与操作审计；
+- **M5**：离线组件包、自动部署与发布流水线；
+- **M6（基础能力已实现）**：插件/主题清单与脚手架创建；依赖检查、测试、打包与模板机制待续。

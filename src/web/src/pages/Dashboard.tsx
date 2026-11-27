@@ -1,5 +1,15 @@
-import type { ReactNode } from 'react'
-import { useDiagnostics, useInfo, useServices, useWorkspaces } from '../api/hooks'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState, type ReactNode } from 'react'
+import { api } from '../api/client'
+import {
+  isTerminalTask,
+  useDiagnostics,
+  useInfo,
+  useProject,
+  useServices,
+  useTask,
+  useWorkspaces,
+} from '../api/hooks'
 import type { DiagnosticCheck } from '../api/types'
 import type { Page } from '../components/Layout'
 import {
@@ -9,10 +19,12 @@ import {
   CardHeader,
   EmptyState,
   ErrorNotice,
+  ProgressBar,
   Skeleton,
   Spinner,
   StateBadge,
 } from '../components/ui'
+import { errorMessage } from '../lib/format'
 import {
   formatDate,
   formatUptime,
@@ -65,6 +77,7 @@ function severityLabel(severity: DiagnosticCheck['severity']): string {
 }
 
 export function Dashboard({ onNavigate }: { onNavigate: (page: Page) => void }) {
+  const queryClient = useQueryClient()
   const info = useInfo()
   const workspaces = useWorkspaces()
   const diagnostics = useDiagnostics()
@@ -73,6 +86,38 @@ export function Dashboard({ onNavigate }: { onNavigate: (page: Page) => void }) 
   const list = workspaces.data?.items ?? []
   const active =
     list.find((item) => item.workspace_id === workspaces.data?.active_workspace_id) ?? null
+  const activeID = active?.workspace_id ?? ''
+  const project = useProject(activeID || null)
+  const [taskID, setTaskID] = useState<string | null>(null)
+  const task = useTask(taskID)
+  const [actionError, setActionError] = useState('')
+
+  const projectAction = useMutation({
+    mutationFn: (kind: 'start' | 'stop' | 'restart') => {
+      if (!activeID) {
+        return Promise.reject(new Error('未选择活动 Workspace'))
+      }
+      if (kind === 'start') {
+        return api.startProject(activeID)
+      }
+      if (kind === 'stop') {
+        return api.stopProject(activeID)
+      }
+      return api.restartProject(activeID)
+    },
+    onMutate: () => setActionError(''),
+    onSuccess: (accepted) => {
+      setTaskID(accepted.task_id)
+      void queryClient.invalidateQueries({ queryKey: ['project', activeID] })
+      void queryClient.invalidateQueries({ queryKey: ['workspace-status', activeID] })
+    },
+    onError: (error) => setActionError(errorMessage(error)),
+  })
+
+  const projectStatus = project.data?.project
+  const process = projectStatus?.process
+  const taskRunning = Boolean(task.data && !isTerminalTask(task.data.status))
+  const actionPending = projectAction.isPending || taskRunning
   const counts = diagnostics.data?.counts ?? {}
   const errorCount = counts.error ?? 0
   const warningCount = counts.warning ?? 0
@@ -85,6 +130,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (page: Page) => void }) 
     void workspaces.refetch()
     void diagnostics.refetch()
     void services.refetch()
+    void project.refetch()
   }
 
   const serviceItems = services.data?.items ?? []
@@ -312,6 +358,117 @@ export function Dashboard({ onNavigate }: { onNavigate: (page: Page) => void }) 
         <div className="space-y-6">
           <Card>
             <CardHeader
+              title="项目运行状态"
+              subtitle={
+                process
+                  ? `${project.data?.workspace.name ?? active?.name ?? '当前 Workspace'} · ${process.alive ? '运行中' : '已停止'}`
+                  : '活动 Workspace 的 Rails 开发服务器'
+              }
+              action={
+                <Badge tone={process?.alive ? 'emerald' : 'slate'}>
+                  {process?.alive ? '运行中' : '已停止'}
+                </Badge>
+              }
+            />
+            <div className="p-5">
+              {!activeID ? (
+                <EmptyState
+                  title="未选择活动 Workspace"
+                  description="选择 Workspace 后可在概览页直接启动、停止或重启项目。"
+                  action={<Button onClick={() => onNavigate('workspaces')}>前往 Workspaces</Button>}
+                />
+              ) : project.isLoading ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-5 w-48" />
+                  <Skeleton className="h-5 w-64" />
+                </div>
+              ) : project.error ? (
+                <ErrorNotice error={project.error} onRetry={() => void project.refetch()} />
+              ) : !projectStatus ? (
+                <p className="text-sm text-slate-400">暂无项目状态。</p>
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={process?.alive ? 'emerald' : 'slate'}>
+                      {process?.alive ? '运行中' : '已停止'}
+                    </Badge>
+                    <Badge tone={process?.initialized ? 'cyan' : 'amber'}>
+                      {process?.initialized ? '已初始化' : '未初始化'}
+                    </Badge>
+                    {process?.pid ? (
+                      <span className="font-mono text-[11px] text-slate-500">PID {process.pid}</span>
+                    ) : null}
+                  </div>
+                  <dl className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
+                      <dt className="text-[11px] uppercase tracking-wide text-slate-500">访问地址</dt>
+                      <dd className="mt-1 truncate font-mono text-xs text-slate-300">
+                        {process?.http_url || '—'}
+                      </dd>
+                    </div>
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
+                      <dt className="text-[11px] uppercase tracking-wide text-slate-500">源码</dt>
+                      <dd className="mt-1 text-xs text-slate-300">
+                        {projectStatus.source.installed
+                          ? projectStatus.source.current_branch ||
+                            projectStatus.source.branch ||
+                            '已安装'
+                          : '尚未克隆'}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      disabled={actionPending || !process?.initialized || process?.alive}
+                      onClick={() => projectAction.mutate('start')}
+                    >
+                      启动
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={actionPending || !process?.alive}
+                      onClick={() => projectAction.mutate('stop')}
+                    >
+                      停止
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={actionPending || !process?.initialized}
+                      onClick={() => projectAction.mutate('restart')}
+                    >
+                      重启
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => onNavigate('project')}>
+                      项目详情 →
+                    </Button>
+                  </div>
+                  {task.data ? (
+                    <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                        <span>{task.data.message || task.data.type}</span>
+                        <span>{task.data.progress}%</span>
+                      </div>
+                      <ProgressBar value={task.data.progress} />
+                      {task.data.status === 'failed' ? (
+                        <p className="mt-1 text-[11px] text-rose-300">
+                          {task.data.error_message || '任务失败'}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {actionError ? (
+                    <p className="mt-3 text-xs text-rose-300">{actionError}</p>
+                  ) : null}
+                </>
+              )}
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader
               title="共享服务"
               subtitle="PostgreSQL 与 Redis"
               action={
@@ -426,7 +583,23 @@ export function Dashboard({ onNavigate }: { onNavigate: (page: Page) => void }) 
                   ready: servicesReady,
                   note: servicesReady ? 'Managed/External 服务、WSL2 与组件验证' : 'M2',
                 },
-                { title: 'Git / Discourse 初始化', ready: false, note: 'M3' },
+                {
+                  title: 'Git / Discourse 初始化',
+                  ready: Boolean(info.data?.capabilities?.project),
+                  note: 'clone / pull / 初始化 / 进程监督',
+                },
+                {
+                  title: '备份与恢复',
+                  ready: Boolean(info.data?.capabilities?.backups),
+                  note: '归档校验、恢复预览与一次性令牌',
+                },
+                {
+                  title: '插件与主题',
+                  ready:
+                    Boolean(info.data?.capabilities?.plugins) &&
+                    Boolean(info.data?.capabilities?.themes),
+                  note: '清单、元数据与脚手架创建',
+                },
               ].map((item) => (
                 <div key={item.title} className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2.5">

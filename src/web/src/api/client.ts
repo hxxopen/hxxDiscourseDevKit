@@ -7,6 +7,10 @@ import type {
   DatabasesResponse,
   DeletePlan,
   DiagnosticsReport,
+  ExtensionCreateInput,
+  ExtensionItem,
+  ExtensionKind,
+  ExtensionListing,
   Info,
   LogContent,
   LogSourcesResponse,
@@ -255,6 +259,12 @@ export const api = {
       `${workspacePath(id)}/backups/${encodeURIComponent(backupId)}/restore`,
       { confirm_token: confirmToken },
     ),
+
+  extensions: (kind: ExtensionKind, id: string) =>
+    request<ExtensionListing>('GET', `${workspacePath(id)}/${kind}s`),
+
+  createExtension: (kind: ExtensionKind, id: string, input: ExtensionCreateInput) =>
+    request<ExtensionItem>('POST', `${workspacePath(id)}/${kind}s`, input),
 
   task: (id: string) => request<Task>('GET', `/tasks/${encodeURIComponent(id)}`),
 
