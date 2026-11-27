@@ -21,6 +21,7 @@ import (
 	"github.com/hxx/hxxDiscourseDevKit/internal/backup"
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
+	"github.com/hxx/hxxDiscourseDevKit/internal/diskusage"
 	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/logging"
 	"github.com/hxx/hxxDiscourseDevKit/internal/migration"
@@ -209,6 +210,7 @@ func Run(ctx context.Context, opts Options) error {
 		Tasks:            tasks,
 		Diagnostics:      diag,
 		StorageMigration: storageMigration,
+		DiskUsage:        diskusage.New(runtimeManager, paths),
 		UI:               webembed.FS(),
 		Logger:           logProvider.Logger(),
 		Dev:              opts.Dev,

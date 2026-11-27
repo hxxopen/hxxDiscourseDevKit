@@ -49,6 +49,16 @@ export function useProfileCheck(profileId: string | null, enabled: boolean) {
   })
 }
 
+export function useDiskUsage(enabled = true) {
+  return useQuery({
+    queryKey: ['disk-usage'],
+    queryFn: api.diskUsage,
+    enabled,
+    refetchInterval: 60_000,
+    retry: false,
+  })
+}
+
 export function useDiagnostics() {
   return useQuery({
     queryKey: ['diagnostics'],

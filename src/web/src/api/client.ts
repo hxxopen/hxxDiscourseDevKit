@@ -9,6 +9,7 @@ import type {
   DatabasesResponse,
   DeletePlan,
   DiagnosticsReport,
+  DiskUsageResponse,
   ExtensionCheckReport,
   ExtensionCreateInput,
   ExtensionItem,
@@ -171,6 +172,8 @@ function servicePath(name: ServiceName): string {
 
 export const api = {
   info: () => request<Info>('GET', '/system/info'),
+
+  diskUsage: () => request<DiskUsageResponse>('GET', '/system/disk'),
 
   diagnostics: () => request<DiagnosticsReport>('GET', '/diagnostics'),
 

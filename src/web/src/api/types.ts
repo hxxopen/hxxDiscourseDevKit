@@ -86,6 +86,26 @@ export interface StorageMigrationPlan {
   expires_at?: string
 }
 
+export interface DiskVolume {
+  id: string
+  kind: 'wsl' | 'host' | string
+  label: string
+  path: string
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+  percent_used: number
+  vhdx_path?: string
+  vhdx_bytes?: number
+  available: boolean
+  error?: string
+}
+
+export interface DiskUsageResponse {
+  generated_at: string
+  volumes: DiskVolume[]
+}
+
 export interface Info {
   version: VersionInfo
   instance_id: string

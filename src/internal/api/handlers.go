@@ -112,6 +112,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			"theme_preview":     s.opts.ThemePreview != nil,
 			"profiles":          s.opts.Profiles != nil,
 			"storage_migration": s.opts.StorageMigration != nil,
+			"disk_usage":        s.opts.DiskUsage != nil,
 		},
 	})
 }

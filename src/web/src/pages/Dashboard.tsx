@@ -4,13 +4,14 @@ import { api } from '../api/client'
 import {
   isTerminalTask,
   useDiagnostics,
+  useDiskUsage,
   useInfo,
   useProject,
   useServices,
   useTask,
   useWorkspaces,
 } from '../api/hooks'
-import type { DiagnosticCheck } from '../api/types'
+import type { DiagnosticCheck, DiskVolume } from '../api/types'
 import type { Page } from '../components/Layout'
 import {
   Badge,
@@ -26,6 +27,7 @@ import {
 } from '../components/ui'
 import { errorMessage } from '../lib/format'
 import {
+  formatBytes,
   formatDate,
   formatUptime,
   serviceStateLabel,
@@ -64,6 +66,59 @@ function StatCard({
   )
 }
 
+function DiskVolumeCard({ volume }: { volume: DiskVolume }) {
+  const tone =
+    volume.percent_used >= 90 ? 'rose' : volume.percent_used >= 75 ? 'amber' : 'emerald'
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-slate-200">{volume.label}</p>
+          <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500" title={volume.path}>
+            {volume.path || '—'}
+          </p>
+        </div>
+        <Badge tone={volume.available ? tone : 'rose'}>
+          {volume.available ? `${volume.percent_used.toFixed(1)}%` : '不可用'}
+        </Badge>
+      </div>
+      {volume.available ? (
+        <>
+          <p className="mt-3 text-xs text-slate-400">
+            已用 <span className="font-mono text-slate-200">{formatBytes(volume.used_bytes)}</span>
+            <span className="text-slate-600"> / </span>
+            {formatBytes(volume.total_bytes)}
+          </p>
+          <div className="mt-2">
+            <ProgressBar value={volume.percent_used} />
+          </div>
+          <p className="mt-1.5 text-[11px] text-slate-500">
+            可用 {formatBytes(volume.free_bytes)}
+          </p>
+          {volume.kind === 'wsl' && volume.vhdx_bytes ? (
+            <div className="mt-3 rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2">
+              <p className="text-[11px] text-amber-200/80">虚拟磁盘文件实际占用</p>
+              <p className="mt-0.5 font-mono text-sm text-amber-200">
+                {formatBytes(volume.vhdx_bytes)}
+              </p>
+              {volume.vhdx_path ? (
+                <p
+                  className="mt-0.5 truncate font-mono text-[10px] text-slate-500"
+                  title={volume.vhdx_path}
+                >
+                  {volume.vhdx_path}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <p className="mt-3 text-xs text-rose-300">{volume.error || '无法读取磁盘信息'}</p>
+      )}
+    </div>
+  )
+}
+
 function severityTone(severity: DiagnosticCheck['severity']): 'rose' | 'amber' | 'sky' {
   if (severity === 'error') return 'rose'
   if (severity === 'warning') return 'amber'
@@ -82,6 +137,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (page: Page) => void }) 
   const workspaces = useWorkspaces()
   const diagnostics = useDiagnostics()
   const services = useServices()
+  const diskEnabled = Boolean(info.data?.capabilities?.disk_usage)
+  const disk = useDiskUsage(diskEnabled)
 
   const list = workspaces.data?.items ?? []
   const active =
@@ -131,6 +188,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (page: Page) => void }) 
     void diagnostics.refetch()
     void services.refetch()
     void project.refetch()
+    if (diskEnabled) {
+      void disk.refetch()
+    }
   }
 
   const serviceItems = services.data?.items ?? []
@@ -229,6 +289,48 @@ export function Dashboard({ onNavigate }: { onNavigate: (page: Page) => void }) 
           </>
         )}
       </div>
+
+      {diskEnabled ? (
+        <Card>
+          <CardHeader
+            title="磁盘使用情况"
+            subtitle={
+              disk.data
+                ? `更新于 ${formatDate(disk.data.generated_at)} · WSL2 虚拟磁盘只增不减，请关注 ext4.vhdx 的实际大小`
+                : 'WSL2 虚拟磁盘与宿主磁盘'
+            }
+            action={
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void disk.refetch()}
+                disabled={disk.isFetching}
+              >
+                {disk.isFetching ? <Spinner /> : '刷新'}
+              </Button>
+            }
+          />
+          <div className="p-5">
+            {disk.isLoading ? (
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <Skeleton className="h-32" />
+                <Skeleton className="h-32" />
+                <Skeleton className="h-32" />
+              </div>
+            ) : disk.error ? (
+              <ErrorNotice error={disk.error} onRetry={() => void disk.refetch()} />
+            ) : (disk.data?.volumes.length ?? 0) === 0 ? (
+              <p className="text-sm text-slate-400">没有可显示的磁盘信息。</p>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {(disk.data?.volumes ?? []).map((volume) => (
+                  <DiskVolumeCard key={volume.id} volume={volume} />
+                ))}
+              </div>
+            )}
+          </div>
+        </Card>
+      ) : null}
 
       <div className="grid gap-6 xl:grid-cols-[1.35fr_1fr]">
         <div className="space-y-6">

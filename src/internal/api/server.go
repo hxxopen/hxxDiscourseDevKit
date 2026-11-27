@@ -15,6 +15,7 @@ import (
 	"github.com/hxx/hxxDiscourseDevKit/internal/backup"
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
+	"github.com/hxx/hxxDiscourseDevKit/internal/diskusage"
 	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/httpx"
 	"github.com/hxx/hxxDiscourseDevKit/internal/profile"
@@ -31,6 +32,11 @@ import (
 // Discourse instance.
 type ThemePreviewer interface {
 	Preview(ctx context.Context, workspaceRef, slug, apiKey string) (*themepreview.Result, error)
+}
+
+// DiskUsageReporter collects filesystem usage for the dashboard.
+type DiskUsageReporter interface {
+	Report(ctx context.Context) diskusage.Report
 }
 
 // Options supplies the API server's dependencies.
@@ -51,6 +57,7 @@ type Options struct {
 	Tasks            *task.Manager
 	Diagnostics      *diagnostics.Service
 	StorageMigration StorageMigrator
+	DiskUsage        DiskUsageReporter
 	UI               fs.FS
 	Logger           *slog.Logger
 	Dev              bool
@@ -118,6 +125,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	}
 
 	auth("GET /api/v1/system/info", s.handleInfo)
+	auth("GET /api/v1/system/disk", s.handleDiskUsage)
 	auth("GET /api/v1/diagnostics", s.handleDiagnostics)
 	auth("GET /api/v1/settings", s.handleGetSettings)
 	auth("PATCH /api/v1/settings", s.handleUpdateSettings)
