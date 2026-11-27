@@ -35,7 +35,7 @@ M1 完成后即可在 Windows / macOS / Linux 上运行 DevKit 本体、创建�
 
 - 不安装、不启动真实 PostgreSQL/Redis（M1 只生成隔离配置和凭据）。
 - 不克隆真实 Discourse 源码（M3）。
-- 不实现 Windows WSL2 发行版自动部署（M5；M2 仅支持已存在 WSL2 发行版的执行桥接）。
+- 不实现 Windows WSL2 发行版自动部署或导入（M5；M2 仅支持已存在 WSL2 发行版的执行桥接，以及向 Debian/Ubuntu 发行版安装运行时组件）。
 - 不做安装包、签名、公证、离线包（M5）。
 - 不做插件/主题开发的完整工具链（M6）。
 
@@ -208,7 +208,11 @@ D:\work\h2x\hxxDiscourseDevKit\
   },
   "runtime": {
     "default_profile": "default",
-    "matrix_file": "config/runtime-matrix.json"
+    "matrix_file": "config/runtime-matrix.json",
+    "wsl_distro": "Ubuntu-22.04"
+  },
+  "storage": {
+    "data_root": "\\\\wsl.localhost\\Ubuntu-22.04\\home\\dev\\hxxwork"
   },
   "services": {
     "postgresql": {
@@ -242,6 +246,8 @@ D:\work\h2x\hxxDiscourseDevKit\
 **要点**
 
 - `mode` 为 `managed` 或 `external`；`external` 时使用 `external` 子对象（host/port/database/username/password_ref/tls）。
+- `storage.data_root` 为空表示项目/服务数据与配置共用实例根目录；Windows 新实例默认写入 WSL2 用户主目录下的 `hxxwork` 子目录（`~/hxxwork`）。`services.*.data_dir` 的相对路径以 `data_root` 为基准。
+- `runtime.wsl_distro` 为空时使用第一个已安装发行版。
 - 密码只保存 **ref**，真实值在 `secrets.json`。
 - 托管 PostgreSQL/Redis 默认使用非标准端口，避免与用户已有实例冲突。
 - `active_workspace_id` 由服务端校验存在性；指向不存在时自动回退到第一个可用 Workspace 并记录警告。
@@ -547,11 +553,13 @@ type SystemServiceHost interface { // 可选：launchd/systemd 用户服务
 ### 6.3 Windows + WSL2 设计要点
 
 - **DevKit Core 运行在 Windows 侧**，负责 UI/API/状态管理；开发命令通过 `wsl.exe -d <distro> --cd <linux-path> -- <cmd>` 执行。
-- Workspace 源码放在 WSL2 文件系统（如 `~/.hxxddk/workspaces/...`），**不放在 `/mnt/c`**；Windows 侧通过 `\\wsl.localhost\<distro>\...` 访问文件。
-- 路径映射集中在 `windows.FileSystem.ToExecPath`，禁止在其他模块拼接 Linux 路径。
-- 检测项：Windows 版本、虚拟化、WSL 功能、发行版存在性、systemd 可用性、发行版内 glibc/Ruby 依赖。
-- 自动启用 WSL、导入发行版、安装发行版内依赖属于 M5，需要管理员权限与可能的重启；必须先检测并给出可恢复说明。
-- M2 只支持"用户已有可用 WSL2 发行版"的场景，并提供清晰错误。
+- Workspace 源码放在 WSL2 文件系统（`~/hxxwork/workspaces/...`），**不放在 `/mnt/c`**；Windows 侧通过 `\\wsl.localhost\<distro>\...` 访问文件。
+- 路径映射集中在 `runtime.Manager.TranslatePath` / `ToWSLPath`，禁止在其他模块拼接 Linux 路径。
+- 存储布局：`config/`、`logs/`、`run/` 固定在 Windows 实例根目录；`workspaces/`、`services/`、`backups/`、`tmp/` 位于 `storage.data_root`。新实例在 Windows 上默认把 `data_root` 初始化为 WSL 用户主目录下的 `hxxwork` 子目录（`~/hxxwork`），旧实例不自动迁移，只在概览/运行时/设置页提示。
+- 检测项：Windows 版本、虚拟化、WSL 功能、发行版存在性、发行版类型、默认用户、主目录、`-u root` 执行能力。
+- 运行时安装：复用已有发行版，在「运行时」页预览 `apt-get update` 与 `apt-get install` 的固定 argv，确认后以 `runtime.install` 后台任务执行；日志写入 `logs/runtime-install.log` 并脱敏。安装后重新探测组件路径并写入 `config/runtime-discovered.json`，服务启动不再依赖 PATH（例如 Debian 的 `/usr/lib/postgresql/<ver>/bin/pg_ctl`）。
+- 自动安装仅支持 Debian/Ubuntu 系；其他发行版提示手动安装。自动启用 WSL、导入发行版、安装完整 glibc/Ruby 依赖仍属于 M5。
+- M2 只支持"用户已有可用 WSL2 发行版"的场景，并提供清晰错误；WSL2 不可用时不回退到原生 Windows 安装。
 
 ### 6.4 进程树与信号
 
@@ -615,10 +623,11 @@ type SystemServiceHost interface { // 可选：launchd/systemd 用户服务
 | 401 | `UNAUTHORIZED` | 缺少/错误 token |
 | 403 | `FORBIDDEN_ORIGIN` / `CSRF_INVALID` | 来源或 CSRF 校验失败 |
 | 404 | `WORKSPACE_NOT_FOUND` / `TASK_NOT_FOUND` | 资源不存在 |
-| 409 | `WORKSPACE_BUSY` / `PORT_IN_USE` / `INVALID_STATE` | 状态冲突 |
-| 422 | `PREVIEW_REQUIRED` | 破坏性操作缺少预览/确认 |
+| 409 | `WORKSPACE_BUSY` / `PORT_IN_USE` / `INVALID_STATE` / `SERVICE_NOT_INSTALLED` / `RUNTIME_DISTRO_UNSUPPORTED` | 状态冲突或发行版不支持 |
+| 422 | `PREVIEW_REQUIRED` | 破坏性操作缺少预览/确认（含运行时安装令牌） |
 | 500 | `INTERNAL` | 未预期错误（不回显内部细节） |
-| 503 | `SERVICE_UNAVAILABLE` | 依赖服务不可用 |
+| 501 | `RUNTIME_INSTALL_UNSUPPORTED` | 非 Windows 平台请求运行时安装 |
+| 503 | `SERVICE_UNAVAILABLE` / `RUNTIME_WSL_UNAVAILABLE` | 依赖服务或 WSL2 不可用 |
 
 ### 7.4 端点清单
 
@@ -670,10 +679,14 @@ type SystemServiceHost interface { // 可选：launchd/systemd 用户服务
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/runtime` | 组件清单与版本 |
 | GET | `/api/v1/runtime/matrix` | 当前版本矩阵 |
-| POST | `/api/v1/runtime/{component}/verify` | 校验 |
-| POST | `/api/v1/runtime/{component}/repair` | 修复（202） |
+| GET | `/api/v1/runtime/components` | 组件清单、实际版本与执行环境 |
+| GET | `/api/v1/runtime/components/{name}` | 校验单个组件 |
+| POST | `/api/v1/runtime/verify` | 校验全部组件 |
+| GET | `/api/v1/runtime/wsl` | WSL2 发行版、系统、用户与 root 能力 |
+| POST | `/api/v1/runtime/discover` | 重新探测组件路径并写入发现文件 |
+| POST | `/api/v1/runtime/install-preview` | 生成安装计划与一次性确认令牌 |
+| POST | `/api/v1/runtime/install` | 确认安装（202，`runtime.install` 任务） |
 | GET | `/api/v1/services` | PostgreSQL/Redis 状态 |
 | GET | `/api/v1/services/{name}` | 详情 |
 | POST | `/api/v1/services/{name}/start` | 启动 |
@@ -696,6 +709,12 @@ type SystemServiceHost interface { // 可选：launchd/systemd 用户服务
 | DELETE | `/api/v1/workspaces/{id}/backups/{bid}` | 删除备份文件 |
 | GET | `/api/v1/settings` | 全局设置（脱敏） |
 | PUT | `/api/v1/settings` | 更新设置 |
+
+**审计**
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/audit?limit=&action=&workspace_id=&result=&since=` | 查询操作审计（只读，按时间倒序） |
 
 **版本策略**：`/api/v1` 内保持向后兼容；破坏性变更升 `v2`，并保留至少一个版本的过渡期。
 
@@ -743,6 +762,8 @@ hxxddk start|stop|restart
 hxxddk service status|start|stop <postgresql|redis>
 hxxddk backup create [--include-source] [--include-database]
 hxxddk backup restore <file> [--overwrite]
+
+hxxddk audit list [--limit] [--action] [--workspace] [--result] [--since] [--json]
 ```
 
 **约定**
@@ -764,12 +785,13 @@ hxxddk backup restore <file> [--overwrite]
 | `/` | Dashboard：版本、活动 Workspace、服务状态、启动/停止 | M1 基础 / M4 完整 |
 | `/workspaces` | Workspace 列表、创建、删除预览 | M1 |
 | `/workspaces/:id` | 详情：状态、端口、数据库、日志、启动/停止 | M1 基础 / M3 完整 |
-| `/runtime` | 组件版本、路径、校验/修复 | M4 |
+| `/runtime` | 组件版本、路径、校验、WSL2 安装与路径发现 | M4 |
 | `/services` | PostgreSQL/Redis 状态、外部配置、连接测试 | M4 |
 | `/project` | Git 配置、clone/pull/checkout、脏工作区提示 | M4 |
 | `/plugins`、`/themes` | 插件/主题管理 | M6 |
 | `/diagnostics` | 检查结果与修复动作 | M4 |
 | `/logs` | 按模块/Workspace 查看日志 | M4 |
+| `/audit` | 管理操作与拒绝记录（按操作/Workspace/结果过滤） | M4 |
 | `/backups` | 备份、恢复预览 | M4 |
 | `/settings` | 路径、端口、代理、更新策略 | M4 |
 
@@ -827,9 +849,12 @@ web/src/
 ### 10.2 托管 PostgreSQL
 
 - `initdb` 使用 UTF-8、独立 data_dir；
-- 监听 `127.0.0.1:15432`，仅本机；
+- 监听 `127.0.0.1:15432`，仅本机；默认不向局域网或远程主机开放；
 - 创建 `hxxddk_admin` 超级用户（随机密码）；
 - 每个 Workspace：`CREATE ROLE` + `CREATE DATABASE ... OWNER ...`；
+- TCP 连接使用 `scram-sha-256` 认证；本地 Unix socket 使用 `trust`（Linux/macOS 同机其他 OS 用户可能无需密码，需在文档中披露）；
+- 监听地址可在 Managed 配置中改为 `0.0.0.0` 等非回环地址，但会扩大暴露面，不作为默认或推荐配置；
+- 连接凭据写入 Workspace 的 `config/discourse.env`（0600），管理 UI/API 不返回明文密码；`password_ref` 仅为密钥名称；
 - 启动/停止使用 `pg_ctl`（或平台服务管理），记录 PID 与日志；
 - 备份使用 `pg_dump -Fc`；恢复使用 `pg_restore`；
 - 停止前检查依赖该服务的运行中 Workspace，提示确认。
@@ -837,23 +862,26 @@ web/src/
 ### 10.3 托管 Redis
 
 - 独立 data_dir、日志、密码（requirepass）；
-- 监听 `127.0.0.1:16379`；
+- 监听 `127.0.0.1:16379`；`protected-mode yes`，默认不向局域网或远程主机开放；
 - 持久化策略由配置决定（开发默认 RDB）；
 - Workspace 使用独立 DB index；内存/连接数通过 `INFO` 读取；
+- 密码自动生成并保存在受保护密钥存储中，同时写入 Workspace 的 `config/discourse.env`（0600）；管理 UI/API 不回显；
 - 清理命名空间仅在明确指定 DB index 且确认后执行。
 
 ### 10.4 外部服务
 
 - 支持 host/port/database/username/password/TLS；
+- 连接用户已有的本机或远程 PostgreSQL/Redis 时选择 External；管理 UI 提供用户名/密码输入，密码留空表示沿用已保存凭据，新值只写入受保护的 `secrets.json`，API 不回显；
 - "测试连接"执行带超时的轻量查询（PG `SELECT 1`、Redis `PING`）；
 - 保存前测试可选；失败不回写配置；
 - 切换到外部后，托管服务实例不被删除，仅停止/失活；
-- 恢复为 managed 时重新校验数据目录与端口。
+- 恢复为 managed 时重新校验数据目录与端口；
+- Managed 与 External 均只支持 PostgreSQL；MySQL/MariaDB 不受支持（Discourse 仅使用 PostgreSQL）。
 
 ### 10.5 凭据与权限
 
 - 数据库密码长度 ≥ 24，随机生成；
-- 不在 API 响应的 `details` 中返回密码；仅创建时可选一次性返回（若 UI 需要展示）；
+- 不在 API 响应中返回密码，管理 UI 不显示明文；服务密码只写入受保护的 `secrets.json`，Workspace 连接凭据只写入 `config/discourse.env`（0600）；
 - Git token 只通过 `GIT_ASKPASS` 辅助程序传递，不进入命令行参数、remote URL 或日志；
 - 所有子进程环境变量在日志中脱敏。
 
@@ -906,6 +934,14 @@ web/src/
 - 脱敏：token、password、secret、authorization、cookie、git URL 中的 userinfo。
 - 敏感值禁止进入 `fields`；若必须记录，记录 `<redacted:sha256:xxxxxxxx>`。
 
+**操作审计**（独立于运行日志）：
+
+- 文件：`logs/audit/audit-YYYY-MM-DD.jsonl`，追加写入，Unix 0600（Windows 当前用户 ACL），保留天数跟随 `retention_days`。
+- 记录范围：所有非 GET 的已认证/被拒绝请求，包含动作名、结果（`success` / `accepted` / `failure`）、HTTP 状态、Workspace、目标对象、来源端（`ui` / `cli` / `api`）、请求 ID、远端地址与耗时。
+- 只记录请求元数据与路径，**不记录请求体、查询串、密码、API Key、确认令牌**。
+- 异步操作在 202 时记为 `accepted`，最终成败以任务历史与运行日志为准。
+- 查询：`GET /api/v1/audit`、`hxxddk audit list` 与「审计」页面；支持操作、Workspace、结果、起始时间与条数过滤。
+
 ### 11.2 诊断项（首批）
 
 | ID | 检查 | 严重级别 |
@@ -951,6 +987,7 @@ web/src/
 | UI | CSP、`nosniff`、`no-store`、不内联脚本 |
 | 升级 | 校验组件哈希/签名（M2 起）；升级不覆盖用户源码与配置 |
 | 日志 | 不记录密码、Token、Cookie、私有仓库凭据 |
+| 操作审计 | 只记录请求元数据，不记录请求体；文件 0600 / 当前用户 ACL；保留期跟随日志设置 |
 
 **本地安全边界说明**：本机其他进程仍可读取 0600 文件（同一用户），这是本地开发工具的合理边界；API 认证主要防御浏览器跨站请求和非预期调用，不宣称防御同用户恶意进程。
 
@@ -1164,16 +1201,16 @@ var (
 
 ### 15.5 M4：完整管理 UI（预计 8–10 个工作日）
 
-> **实施状态（2026-11-27）**：已新增 Runtime / Logs / Settings 页面、日志聚合 API 与设置读写 API，并将 Backup 拆分为独立页面（Workspace 选择、摘要、共享备份卡片）；管理 UI 接入 SSE 任务事件刷新；概览页补充活动 Workspace 的项目启停/重启与任务进度。Plugins / Themes 页面已基于 M6 基础能力实现（清单、元数据、脚手架创建），11 个页面全部可访问。新增守护进程 E2E 测试，覆盖会话/CSRF、SSE、Workspace 创建与删除、日志读取、设置 PATCH 与后台任务轮询。i18n 结构化与浏览器端 UI E2E 待补齐。`go test ./...`、`go vet ./...`、`npm run build` 通过。
+> **实施状态（2026-11-27）**：已新增 Runtime / Logs / Settings 页面、日志聚合 API 与设置读写 API，并将 Backup 拆分为独立页面（Workspace 选择、摘要、共享备份卡片）；管理 UI 接入 SSE 任务事件刷新；概览页补充活动 Workspace 的项目启停/重启与任务进度。Plugins / Themes 页面已基于 M6 基础能力实现（清单、元数据、脚手架创建），12 个页面全部可访问。新增守护进程 E2E 测试，覆盖会话/CSRF、SSE、Workspace 创建与删除、日志读取、设置 PATCH 与后台任务轮询。操作审计已实现：中间件记录全部非 GET 请求（含未认证拒绝），按日写入 0600 的 `logs/audit/`，只记录元数据不记录请求体；新增 `GET /api/v1/audit`、`hxxddk audit list` 与「审计」页面，支持操作/Workspace/结果/时间过滤。浏览器端 UI E2E 已补齐：Playwright 驱动无头 Edge，覆盖 12 个页面导航与 Workspace 创建 → 审计记录 → 删除流程；测试使用端口 17870、一次性根目录 `src/.devkit/e2e-browser`，并通过 `storage.data_root` 固定数据位置，避免读写共享 WSL2 数据目录中的真实 Workspace。守护进程 E2E 同样在临时根目录预写 `storage.data_root`，保证测试隔离。i18n 结构化仍待补齐。另新增 Windows 旧数据目录一键迁移：Settings / Runtime 页面可先预览源与目标、复制/跳过/阻塞单元、需停止的 Workspace 与服务及空间检查，确认后以 `storage.migrate` 后台任务执行；迁移期间其他写操作暂停、任务可取消，成功后保留旧数据并提示重启 devkitd。后端新增 `internal/migration` 与 `POST /api/v1/settings/storage/migration[/preview]`，仅支持旧布局 Windows 实例且目标固定为 WSL2 用户主目录下的 `~/hxxwork`；迁移会识别旧版本 `~/.local/share/hxxDiscourseDevKit` 下的托管服务数据并一并复制到新根目录。另修正 Windows 运行时命令解析：默认 WSL2 发行版可用时，`node`/`npm`/`yarn`/`ruby`/`bundle`/`git` 等统一在 WSL2 内解析，忽略 interop 暴露的 `/mnt/<盘符>/...` Windows 程序；`config/runtime-discovered.json` 中的 native 条目在 WSL2 可用时不再优先，避免 Windows Node 对 WSL 工作区执行 `npm install` 时写入 Windows 专用产物。`go test ./...`、`go vet ./...`、`npm run build`、`npm run test:e2e` 通过。
 
-- Runtime、Services、Project、Diagnostics、Logs、Backup、Settings 页面；
+- Runtime、Services、Project、Diagnostics、Logs、Audit、Backup、Settings 页面；
 - SSE 实时任务与状态；
 - 确认流程、错误态、空状态、加载态；
 - i18n 结构化、可访问性检查。
 
 **DoD**
 
-- 设计规范 §9.2 的 11 个页面全部可用；
+- 设计规范 §9.2 的 12 个页面全部可用；
 - 所有破坏性操作都有预览与确认；
 - 前端构建内嵌后单二进制可完整使用；
 - 关键流程有 E2E 测试。
@@ -1197,12 +1234,12 @@ var (
 
 ### 15.7 M6：开发者体验（预计 8–12 个工作日）
 
-> **实施状态（2026-11-27）**：已实现插件/主题基础能力：按 Workspace 列出插件（源码 `plugins/`）与主题（`data/themes/`），解析 `plugin.rb` / `about.json` 元数据，并提供经过名称、slug、长度与目录边界校验的脚手架创建；插件创建要求源码已安装。已接入管理 API、`hxxddk plugin|theme list|create` 与 Plugins / Themes 页面。启用/禁用、依赖检查、测试、打包与 Project Profile/模板机制尚未实现。
+> **实施状态（2026-11-27）**：已实现插件/主题基础能力：按 Workspace 列出插件（源码 `plugins/`）与主题（`data/themes/`），解析 `plugin.rb` / `about.json` 元数据，并提供经过名称、slug、长度与目录边界校验的脚手架创建；插件创建要求源码已安装。新增 ZIP 打包：输出到 `data/exports/plugins|themes/`，返回文件大小、文件数与 SHA-256，排除 `.git`、`node_modules` 与符号链接。已接入管理 API、`hxxddk plugin|theme list|create|package` 与 Plugins / Themes 页面。插件启用/禁用已实现：项目停止时在源码 `plugins/<slug>` 与 `data/disabled-plugins/<slug>` 之间迁移目录，清单会合并两侧并标记 `enabled`，重复操作与项目运行中操作分别返回 `EXTENSION_STATE_CONFLICT` / `PROJECT_RUNNING`，被禁用插件仍可打包；新增 `enable|disable` API、CLI 子命令与页面确认流程。Project Profile v1 已实现：5 个内置模板、来源/操作/权限元数据、按模板解析项目类型与默认源码、仓库/分支覆盖校验，以及 Runtime/服务/源码预检 API（`/profiles`、`/profiles/{id}/check`）；CLI 新增 `profile list|show|check` 与 `workspace create --profile`，新建 Workspace 弹窗提供模板选择与预检展示，Workspace 持久化 `profile_id`。依赖检查已实现：新增 `GET /plugins/{slug}/check`、`GET /themes/{slug}/check`、`hxxddk plugin|theme check` 与页面报告弹窗；读取 `plugin.rb` 的 `required_version` 与主题 `about.json` 的 `minimum_discourse_version` / `maximum_discourse_version`，从源码 `lib/version.rb` 解析当前版本并比较（预发布版本低于同号稳定版），同时检查元数据完整性、插件 `package.json`、主题目录结构与启用状态；报告区分 `ok`/`warning`/`error`/`skipped`，只有错误会使 `ready=false`，CLI 在错误时退出码为 1。插件自动化测试已实现：新增 `POST /plugins/{slug}/test`、`hxxddk plugin test` 与插件页面「运行测试」弹窗；要求 Workspace 已初始化、插件已启用并存在 `spec/*_spec.rb`，由管理连接创建 `<数据库名>_test` 隔离库，以 `RAILS_ENV=test LOAD_PLUGINS=1 RAILS_DB=<数据库名>_test` 执行 `db:create db:migrate` 与插件 RSpec；测试为可取消后台任务，日志按完整行脱敏后写入 `logs/test.log` 并通过日志来源 `workspace:<ID>:test` 暴露，删除 Workspace 时同步清理测试库。第三方模板来源已实现：新增 `devkit-profiles.json` 清单（schema v1、严格 JSON、数据-only）、本地目录与 Git 来源注册/刷新/注销 API（`/profile-sources`）与 CLI（`profile source list|add|refresh|remove`）；Git 来源浅克隆到 `profiles/<来源 ID>`，刷新成功后原子替换，失败保留旧模板并记录 `last_error`；第三方 Profile 强制标记 `verified=false`，创建 Workspace 需 `accept_profile` / `--accept-profile` / UI 勾选确认，否则返回 `PROFILE_ACK_REQUIRED`；设置页新增来源管理与来源路径展示，并提供 `examples/profile-source/devkit-profiles.json` 示例。主题构建与本地预览已实现：`POST /themes/{slug}/build` 先运行依赖检查，只有无阻塞错误时才打包；`POST /themes/{slug}/preview` 要求 Workspace 项目正在运行，先探测站点 `/about.json`，再通过 Discourse `/admin/themes/import.json` 导入 ZIP，并复用 `data/theme-previews.json` 中记录的预览主题 ID（首次 `created`，之后 `updated`）。管理员 API Key 通过 `PUT|DELETE /settings/theme-preview` 保存或清除，写入本机 0600 权限的 `secrets.json`，不回显、不写日志；预览仅允许当前 Workspace 自己的站点地址，避免凭据被发往任意远程站点。CLI 新增 `theme build|preview`，主题页提供构建/预览工作台，设置页提供 Key 管理。
 
-- 插件开发：创建、依赖检查、测试、打包；
-- 主题开发：创建、预览、构建；
-- Project Profile/模板机制（`discourse-official`、`discourse-plugin`、`discourse-theme`、`discourse-custom`、`hxx-agentforge`）；
-- 模板来源展示与权限提示；
+- 插件开发：创建、依赖检查、测试、打包（均已实现；测试使用隔离测试数据库运行 RSpec）；
+- 主题开发：创建、依赖检查、构建、本地 Discourse 预览与 ZIP 打包（均已实现）；
+- Project Profile/模板机制（`discourse-official`、`discourse-plugin`、`discourse-theme`、`discourse-custom`、`hxx-agentforge`）——内置模板、依赖预检、API/CLI/UI 已实现；
+- 模板来源展示与权限提示——内置与第三方来源均已展示，第三方 Profile 创建前强制确认；
 - CLI 完善与文档；
 - 可选桌面壳评估（不承诺）。
 

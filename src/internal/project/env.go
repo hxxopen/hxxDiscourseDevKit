@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hxx/hxxDiscourseDevKit/internal/logging"
+	"github.com/hxx/hxxDiscourseDevKit/internal/platform"
 	"github.com/hxx/hxxDiscourseDevKit/internal/runtime"
 	"github.com/hxx/hxxDiscourseDevKit/internal/secret"
 	"github.com/hxx/hxxDiscourseDevKit/internal/store"
@@ -154,6 +155,7 @@ func (m *Manager) wslGatewayHost(ctx context.Context, execution string) string {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(probeCtx, "wsl.exe", "-d", distro, "--", "ip", "route", "show", "default")
+	platform.HideWindow(cmd)
 	cmd.Env = append(os.Environ(), "WSL_UTF8=1")
 	output, err := cmd.Output()
 	if err != nil {

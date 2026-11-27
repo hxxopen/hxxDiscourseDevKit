@@ -84,7 +84,6 @@ func (m *Manager) Status(ctx context.Context, ref string) (*Status, error) {
 
 	source := SourceStatus{
 		Configured:    strings.TrimSpace(ws.Source.RepositoryURL) != "",
-		Installed:     ws.Source.Installed,
 		Path:          sourceDir,
 		RepositoryURL: ws.Source.RepositoryURL,
 		Branch:        ws.Source.Branch,
@@ -95,12 +94,11 @@ func (m *Manager) Status(ctx context.Context, ref string) (*Status, error) {
 		Submodules:    ws.Source.Submodules,
 		LastSyncAt:    ws.Source.LastSyncAt,
 	}
-	if info, statErr := os.Stat(sourceDir); statErr == nil && info.IsDir() {
-		source.Installed = true
-		if info, err := os.Stat(filepath.Join(sourceDir, ".git")); err == nil && info.IsDir() {
-			source.IsGit = true
-		}
-	}
+	// Derive "installed" from the directory contents instead of trusting the
+	// workspace metadata alone. A failed clone can leave an empty source/
+	// directory; counting that as installed disables "克隆源码" and enables
+	// fetch/pull, which then fail with ErrSourceMissing.
+	source.Installed, source.IsGit = sourcePresence(sourceDir)
 
 	checks := make([]Check, 0, 6)
 	sourceCheck := Check{Name: "source", OK: source.Installed}
@@ -182,7 +180,7 @@ func (m *Manager) SaveSource(ctx context.Context, ref string, input SourceInput)
 	if err != nil {
 		return nil, err
 	}
-	if ws.Source.Installed && urlChanged {
+	if installed, _ := sourcePresence(m.sourcePath(ws)); installed && urlChanged {
 		return nil, fmt.Errorf("%w: 源码已检出，如需更换仓库请先清空源码目录", ErrSourceInstalled)
 	}
 	if selectionChanged {
@@ -365,11 +363,7 @@ func portAvailable(host string, port int) bool {
 var hexRefPattern = regexp.MustCompile(`^[0-9a-fA-F]{4,64}$`)
 var scpURLPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:`)
 
-func validateSource(repositoryURL, branch, tag, commit string) error {
-	repositoryURL = strings.TrimSpace(repositoryURL)
-	if repositoryURL == "" {
-		return fmt.Errorf("%w: 仓库地址不能为空", ErrSourceNotConfigured)
-	}
+func validateRepositoryURLValue(repositoryURL string) error {
 	if strings.HasPrefix(repositoryURL, "-") || strings.ContainsAny(repositoryURL, "\x00\r\n ") {
 		return fmt.Errorf("%w: 仓库地址无效", ErrInvalidSource)
 	}
@@ -389,6 +383,40 @@ func validateSource(repositoryURL, branch, tag, commit string) error {
 		if strings.Contains(authority, "@") {
 			return fmt.Errorf("%w: 仓库地址不能包含用户名或密码，请使用 SSH Agent 或 Git 凭据助手", ErrInvalidSource)
 		}
+	}
+	return nil
+}
+
+// ValidateRepositoryURL checks a repository URL before it is persisted. An
+// empty value is allowed; callers decide whether the source is required.
+func ValidateRepositoryURL(repositoryURL string) error {
+	repositoryURL = strings.TrimSpace(repositoryURL)
+	if repositoryURL == "" {
+		return nil
+	}
+	return validateRepositoryURLValue(repositoryURL)
+}
+
+// ValidateBranch checks a branch name before it is persisted. An empty value is
+// allowed; the workspace default applies in that case.
+func ValidateBranch(branch string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return nil
+	}
+	if err := validateRefName(branch); err != nil {
+		return fmt.Errorf("%w: branch %q 无效", ErrInvalidRef, branch)
+	}
+	return nil
+}
+
+func validateSource(repositoryURL, branch, tag, commit string) error {
+	repositoryURL = strings.TrimSpace(repositoryURL)
+	if repositoryURL == "" {
+		return fmt.Errorf("%w: 仓库地址不能为空", ErrSourceNotConfigured)
+	}
+	if err := validateRepositoryURLValue(repositoryURL); err != nil {
+		return err
 	}
 	for name, value := range map[string]string{"branch": branch, "tag": tag, "commit": commit} {
 		if strings.TrimSpace(value) == "" {
@@ -425,4 +453,22 @@ func isEmptyDir(path string) (bool, error) {
 		return false, err
 	}
 	return len(entries) == 0, nil
+}
+
+// sourcePresence reports whether a workspace source directory contains a
+// usable checkout and whether it is a Git repository. Empty or missing
+// directories are not installed, even if workspace metadata says otherwise.
+func sourcePresence(dir string) (installed, gitRepository bool) {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false, false
+	}
+	empty, err := isEmptyDir(dir)
+	if err != nil || empty {
+		return false, false
+	}
+	if info, err := os.Stat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
+		return true, true
+	}
+	return true, false
 }

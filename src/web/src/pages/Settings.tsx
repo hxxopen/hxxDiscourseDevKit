@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { api } from '../api/client'
 import { useSettings } from '../api/hooks'
 import type { DevKitConfig, SettingsInput } from '../api/types'
+import { ProfileSourcesCard } from '../components/ProfileSources'
+import { StorageMigrationCard } from '../components/StorageMigrationCard'
 import {
   Badge,
   Button,
@@ -36,6 +38,7 @@ interface FormState {
 }
 
 const restartLabels: Record<string, string> = {
+  'storage.data_root': '数据目录',
   'network.host': '网络监听地址',
   'network.api_port': '管理 API 端口',
   'project.start_timeout_seconds': '项目启动超时',
@@ -69,12 +72,9 @@ export function Settings() {
   const [form, setForm] = useState<FormState | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [formError, setFormError] = useState('')
-
-  useEffect(() => {
-    if (settings.data) {
-      setForm(formFromConfig(settings.data.config))
-    }
-  }, [settings.data])
+  const [previewKey, setPreviewKey] = useState('')
+  const [previewKeyError, setPreviewKeyError] = useState('')
+  const [previewKeyOpen, setPreviewKeyOpen] = useState(false)
 
   const baseline = useMemo(
     () => (settings.data ? formFromConfig(settings.data.config) : null),
@@ -82,16 +82,25 @@ export function Settings() {
   )
   const dirty = Boolean(form && baseline && JSON.stringify(form) !== JSON.stringify(baseline))
 
+  // Do not clobber unsaved edits when settings are refetched for unrelated reasons
+  // (for example after saving the theme preview API key).
+  useEffect(() => {
+    if (settings.data && !dirty) {
+      setForm(formFromConfig(settings.data.config))
+    }
+  }, [settings.data, dirty])
+
   const save = useMutation({
     mutationFn: (input: SettingsInput) => api.updateSettings(input),
     onSuccess: (data) => {
       queryClient.setQueryData(['settings'], data)
       setForm(formFromConfig(data.config))
+      const restartRequired = data.restart_required ?? []
       setNotice({
         tone: 'success',
         text:
-          data.restart_required.length > 0
-            ? `设置已保存；${data.restart_required.length} 项需要重启 devkitd 后生效`
+          restartRequired.length > 0
+            ? `设置已保存；${restartRequired.length} 项需要重启 devkitd 后生效`
             : '设置已保存',
       })
       void queryClient.invalidateQueries({ queryKey: ['info'] })
@@ -100,6 +109,45 @@ export function Settings() {
     },
     onError: (error) => setNotice({ tone: 'error', text: errorMessage(error) }),
   })
+
+  const savePreviewKey = useMutation({
+    mutationFn: (key: string) => api.setThemePreviewKey(key),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['settings'], data)
+      setPreviewKey('')
+      setPreviewKeyError('')
+      setPreviewKeyOpen(false)
+      setNotice({ tone: 'success', text: 'Discourse 主题预览 API Key 已保存' })
+    },
+    onError: (error) => setNotice({ tone: 'error', text: errorMessage(error) }),
+  })
+
+  const clearPreviewKey = useMutation({
+    mutationFn: () => api.clearThemePreviewKey(),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['settings'], data)
+      setPreviewKey('')
+      setPreviewKeyError('')
+      setPreviewKeyOpen(false)
+      setNotice({ tone: 'success', text: 'Discourse 主题预览 API Key 已清除' })
+    },
+    onError: (error) => setNotice({ tone: 'error', text: errorMessage(error) }),
+  })
+
+  const submitPreviewKey = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const key = previewKey.trim()
+    if (key.length < 16 || key.length > 512) {
+      setPreviewKeyError('API Key 长度必须在 16–512 个字符之间')
+      return
+    }
+    if (!/^[\x21-\x7E]+$/.test(key)) {
+      setPreviewKeyError('API Key 只能包含可见 ASCII 字符，不能包含空格')
+      return
+    }
+    setPreviewKeyError('')
+    savePreviewKey.mutate(key)
+  }
 
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => (current ? { ...current, [key]: value } : current))
@@ -166,7 +214,9 @@ export function Settings() {
     )
   }
 
-  const restartRequired = settings.data.restart_required
+  // Tolerate older daemons that encoded an empty list as null.
+  const restartRequired = settings.data.restart_required ?? []
+  const previewConfigured = settings.data.theme_preview?.api_key_configured ?? false
 
   return (
     <div className="space-y-6">
@@ -177,7 +227,7 @@ export function Settings() {
           </p>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-100">设置</h1>
           <p className="mt-1 text-sm text-slate-400">
-            调整运行时时路径、项目默认值、日志与更新策略。敏感凭据不在本页展示或修改。
+            调整运行时路径、项目默认值、日志与更新策略。敏感凭据只写入本机密钥文件，页面不会回显。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -381,7 +431,7 @@ export function Settings() {
         </div>
 
         <Card>
-          <CardHeader title="更新" subtitle="更新检查仅读取发布元数据，不会自动替换正在运行的二进制。" />
+          <CardHeader title="更新" subtitle="当前版本仅保存更新偏好；版本检查与自动安装将在发布流水线完成后接入。" />
           <div className="grid gap-4 p-5 md:grid-cols-3">
             <Field label="更新通道" htmlFor="settings-channel">
               <select
@@ -439,12 +489,125 @@ export function Settings() {
       </form>
 
       <Card>
-        <CardHeader title="存储路径" subtitle="实例目录布局由启动时的 --root（或默认位置）决定。" />
+        <CardHeader
+          title="主题预览"
+          subtitle="导入本地 Discourse 时使用的管理员 API Key。"
+          action={
+            <Badge tone={previewConfigured ? 'emerald' : 'slate'}>
+              {previewConfigured ? '已配置' : '未配置'}
+            </Badge>
+          }
+        />
+        <div className="space-y-4 p-5">
+          <p className="text-xs leading-5 text-slate-400">
+            在 Discourse 管理后台的 API Keys 页面创建 Key：用户级别选择 Single User，并勾选
+            Global Key。Key 仅保存在本机 0600 权限的 secrets.json 中，不会写入配置文件或日志。
+          </p>
+
+          {!previewConfigured || previewKeyOpen ? (
+            <form onSubmit={submitPreviewKey} className="space-y-3">
+              <Field
+                label={previewConfigured ? '新的 API Key' : 'API Key'}
+                htmlFor="settings-theme-preview-key"
+                error={previewKeyError}
+                hint="至少 16 个字符；保存后不再回显。"
+              >
+                <input
+                  id="settings-theme-preview-key"
+                  type="password"
+                  autoComplete="off"
+                  className={inputClass}
+                  value={previewKey}
+                  onChange={(event) => {
+                    setPreviewKey(event.target.value)
+                    setPreviewKeyError('')
+                  }}
+                  placeholder="粘贴 Discourse 管理员 API Key"
+                />
+              </Field>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="submit" disabled={savePreviewKey.isPending || !previewKey.trim()}>
+                  {savePreviewKey.isPending ? <Spinner /> : null}
+                  保存 Key
+                </Button>
+                {previewConfigured ? (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setPreviewKeyOpen(false)
+                        setPreviewKey('')
+                        setPreviewKeyError('')
+                      }}
+                      disabled={savePreviewKey.isPending}
+                    >
+                      取消
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => clearPreviewKey.mutate()}
+                      disabled={clearPreviewKey.isPending}
+                    >
+                      {clearPreviewKey.isPending ? <Spinner /> : null}
+                      清除已保存 Key
+                    </Button>
+                  </>
+                ) : null}
+              </div>
+            </form>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3">
+              <p className="text-xs text-slate-300">
+                已保存管理员 API Key；主题页可直接预览。
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setPreviewKeyOpen(true)}
+                  disabled={clearPreviewKey.isPending}
+                >
+                  更换 Key
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => clearPreviewKey.mutate()}
+                  disabled={clearPreviewKey.isPending}
+                >
+                  {clearPreviewKey.isPending ? <Spinner /> : null}
+                  清除
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <ProfileSourcesCard />
+
+      <Card>
+        <CardHeader
+          title="存储路径"
+          subtitle="配置与日志位于实例根目录；项目与服务数据可位于 WSL2 数据目录。"
+        />
+        {settings.data.paths.data_root_legacy || settings.data.paths.data_root_pending ? (
+          <div className="mx-5 mt-4">
+            <StorageMigrationCard />
+          </div>
+        ) : null}
         <div className="grid gap-x-8 gap-y-2 p-5 md:grid-cols-2">
           <PathRow label="实例根目录" value={settings.data.paths.root} />
+          <PathRow label="数据目录" value={settings.data.paths.data_root} />
+          <PathRow label="配置与日志位置" value={settings.data.paths.data_root_split ? '实例根目录' : '与数据目录相同（旧布局）'} />
           <PathRow label="配置文件" value={settings.data.paths.config_file} />
           <PathRow label="Workspaces" value={settings.data.paths.workspaces_dir} />
+          <PathRow label="模板来源清单" value={settings.data.paths.profile_sources_file} />
+          <PathRow label="模板来源检出" value={settings.data.paths.profile_sources_dir} />
           <PathRow label="日志" value={settings.data.paths.logs_dir} />
+          <PathRow label="操作审计" value={settings.data.paths.audit_dir} />
           <PathRow label="运行时" value={settings.data.paths.runtime_dir} />
           <PathRow label="共享服务" value={settings.data.paths.services_dir} />
           <PathRow label="临时目录" value={settings.data.paths.tmp_dir} />

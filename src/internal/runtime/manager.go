@@ -19,12 +19,23 @@ import (
 	"time"
 
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
+	"github.com/hxx/hxxDiscourseDevKit/internal/platform"
 )
 
 const (
 	ExecutionNative = "native"
 	executionWSL    = "wsl:"
 )
+
+// IsWSL reports whether an execution target runs inside a WSL distribution.
+func IsWSL(execution string) bool {
+	return strings.HasPrefix(execution, executionWSL)
+}
+
+// WSLExecution returns the execution identifier for a WSL distribution.
+func WSLExecution(distro string) string {
+	return executionWSL + strings.TrimSpace(distro)
+}
 
 // ErrUnknownComponent is returned when a component is not in the matrix.
 var ErrUnknownComponent = errors.New("runtime component not found")
@@ -89,9 +100,12 @@ type Manager struct {
 	cfg   *config.Store
 	log   *slog.Logger
 
-	mu        sync.Mutex
-	distros   []string
-	distrosAt time.Time
+	mu            sync.Mutex
+	distros       []string
+	distrosAt     time.Time
+	wslStatus     WSLStatus
+	wslStatusAt   time.Time
+	installTokens map[string]installToken
 }
 
 // New creates a runtime manager.
@@ -155,8 +169,13 @@ func (m *Manager) verify(ctx context.Context, matrix Matrix, name string, spec C
 		SHA256:          spec.SHA256,
 		CheckedAt:       time.Now().UTC(),
 	}
-	found, err := m.findSpecBinary(ctx, spec)
+	found, err := m.findComponent(ctx, name, spec)
 	if err != nil {
+		// Prefer the specific PATH/WSL lookup message over the generic
+		// "component is not available" from resolution.
+		if _, detail := m.findSpecBinary(ctx, spec); detail != nil {
+			err = detail
+		}
 		status.Message = err.Error()
 		return status
 	}
@@ -233,10 +252,23 @@ func (m *Manager) findSpecBinary(ctx context.Context, spec ComponentSpec) (Found
 	return m.FindBinary(ctx, binary)
 }
 
-// FindBinary resolves an executable on the host first and then in WSL2.
+// FindBinary resolves an executable for the Discourse runtime. On Windows the
+// runtime lives in WSL2, so WSL is authoritative: a native Windows node/npm
+// cannot operate on a WSL workspace (cmd.exe rejects UNC working directories,
+// and npm on Windows would install Windows-only binaries and .cmd shims into a
+// Linux tree). Native lookup remains only as a fallback when WSL is missing.
 func (m *Manager) FindBinary(ctx context.Context, name string) (Found, error) {
 	if name == "" {
 		return Found{}, fmt.Errorf("可执行文件名不能为空")
+	}
+	if goruntime.GOOS == "windows" {
+		distro := m.WSLDistro(ctx)
+		if distro != "" {
+			if found, ok := m.findInWSL(ctx, distro, name); ok {
+				return found, nil
+			}
+			return Found{}, fmt.Errorf("未找到 %s：WSL(%s) 中不可用；运行时命令统一在 WSL2 中执行", name, distro)
+		}
 	}
 	if resolved, err := exec.LookPath(name); err == nil {
 		return Found{Binary: name, Path: resolved, Execution: ExecutionNative}, nil
@@ -244,16 +276,19 @@ func (m *Manager) FindBinary(ctx context.Context, name string) (Found, error) {
 	if goruntime.GOOS != "windows" {
 		return Found{}, fmt.Errorf("未找到 %s", name)
 	}
-	distro := m.WSLDistro(ctx)
-	if distro == "" {
-		return Found{}, fmt.Errorf("未找到 %s（宿主与 WSL 均不可用）", name)
+	return Found{}, fmt.Errorf("未找到 %s：宿主 PATH 中没有，且未检测到可用的 WSL2 发行版（可在设置页指定发行版）", name)
+}
+
+// findInWSL resolves name inside distro, ignoring Windows programs exposed
+// through WSL's interop PATH (/mnt/c/...), which are not Linux runtime tools.
+func (m *Manager) findInWSL(ctx context.Context, distro, name string) (Found, bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	wslPath, err := m.wslWhich(probeCtx, distro, name)
+	if err != nil || wslPath == "" || isWindowsInteropPath(wslPath) {
+		return Found{}, false
 	}
-	execution := executionWSL + distro
-	wslPath, err := m.wslWhich(ctx, distro, name)
-	if err != nil {
-		return Found{}, fmt.Errorf("未找到 %s（宿主与 WSL 均不可用）: %w", name, err)
-	}
-	return Found{Binary: name, Path: wslPath, Execution: execution}, nil
+	return Found{Binary: name, Path: wslPath, Execution: executionWSL + distro}, true
 }
 
 // Sibling looks for another executable in the same directory as found.
@@ -293,6 +328,7 @@ func (m *Manager) RunFound(ctx context.Context, found Found, opts RunOptions) (R
 		return RunResult{Found: found}, err
 	}
 	cmd := exec.CommandContext(ctx, command.Path, command.Args...)
+	platform.HideWindow(cmd)
 	cmd.Env = command.Env
 	cmd.Dir = command.Dir
 	var stdout, stderr bytes.Buffer
@@ -303,6 +339,14 @@ func (m *Manager) RunFound(ctx context.Context, found Found, opts RunOptions) (R
 	}
 	err = cmd.Run()
 	result := RunResult{Found: found, Stdout: stdout.String(), Stderr: stderr.String()}
+	if IsWSL(found.Execution) {
+		// wsl.exe writes its own diagnostics (for example the localhost proxy
+		// warning under NAT networking) to the same streams as the command.
+		// They are not command output and must not reach version or path
+		// parsers.
+		result.Stdout = stripWSLDiagnostics(result.Stdout)
+		result.Stderr = stripWSLProxyNoise(result.Stderr)
+	}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
@@ -310,6 +354,16 @@ func (m *Manager) RunFound(ctx context.Context, found Found, opts RunOptions) (R
 		return result, err
 	}
 	return result, nil
+}
+
+// RunWSL runs argv inside distro without a shell. Arguments are passed
+// verbatim, so callers must translate host paths with ToWSLPath first.
+func (m *Manager) RunWSL(ctx context.Context, distro string, args ...string) (RunResult, error) {
+	if len(args) == 0 {
+		return RunResult{}, fmt.Errorf("WSL 命令不能为空")
+	}
+	found := Found{Binary: args[0], Path: args[0], Execution: WSLExecution(distro)}
+	return m.RunFound(ctx, found, RunOptions{Args: args[1:]})
 }
 
 // Command resolves a command for callers that need to start a long-lived
@@ -392,6 +446,7 @@ func (m *Manager) Exists(ctx context.Context, found Found, execPath string) bool
 	}
 	distro := strings.TrimPrefix(found.Execution, executionWSL)
 	cmd := exec.CommandContext(ctx, "wsl.exe", "-d", distro, "--", "stat", "-L", "-c", "%n", execPath)
+	platform.HideWindow(cmd)
 	cmd.Env = append(os.Environ(), "WSL_UTF8=1")
 	if err := cmd.Run(); err != nil {
 		return false
@@ -414,16 +469,21 @@ func (m *Manager) hashExecutable(ctx context.Context, found Found) (string, erro
 	}
 	distro := strings.TrimPrefix(found.Execution, executionWSL)
 	cmd := exec.CommandContext(ctx, "wsl.exe", "-d", distro, "--", "sha256sum", found.Path)
+	platform.HideWindow(cmd)
 	cmd.Env = append(os.Environ(), "WSL_UTF8=1")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(string(output))
-	if len(fields) == 0 || len(fields[0]) != 64 {
-		return "", fmt.Errorf("sha256sum 输出无效")
+	for _, field := range strings.Fields(trimWSLOutput(string(output))) {
+		if len(field) != 64 {
+			continue
+		}
+		if _, decodeErr := hex.DecodeString(field); decodeErr == nil {
+			return field, nil
+		}
 	}
-	return fields[0], nil
+	return "", fmt.Errorf("sha256sum 输出无效")
 }
 
 func mergeEnv(base, extra []string) []string {
@@ -492,7 +552,10 @@ func (m *Manager) WSLDistros(ctx context.Context) []string {
 	if time.Since(m.distrosAt) < 30*time.Second {
 		return append([]string(nil), m.distros...)
 	}
-	distros := listWSLDistros(ctx)
+	distros, err := listWSLDistrosDetailed(ctx)
+	if err != nil {
+		distros = nil
+	}
 	m.distros = distros
 	m.distrosAt = time.Now()
 	return append([]string(nil), distros...)
@@ -505,6 +568,7 @@ func (m *Manager) ProbeWSL(ctx context.Context) (string, string, error) {
 		return "", "", fmt.Errorf("未检测到可用的 WSL2 发行版")
 	}
 	cmd := exec.CommandContext(ctx, "wsl.exe", "-d", distro, "--", "uname", "-r")
+	platform.HideWindow(cmd)
 	cmd.Env = append(os.Environ(), "WSL_UTF8=1")
 	output, err := cmd.Output()
 	if err != nil {
@@ -513,29 +577,15 @@ func (m *Manager) ProbeWSL(ctx context.Context) (string, string, error) {
 	return distro, trimWSLOutput(string(output)), nil
 }
 
-func listWSLDistros(ctx context.Context) []string {
-	cmd := exec.CommandContext(ctx, "wsl.exe", "-l", "-q")
-	cmd.Env = append(os.Environ(), "WSL_UTF8=1")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	var distros []string
-	for _, line := range strings.Split(trimWSLOutput(string(output)), "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(line, "*"))
-		if line != "" {
-			distros = append(distros, line)
-		}
-	}
-	return distros
-}
-
 func (m *Manager) wslWhich(ctx context.Context, distro, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "wsl.exe", "-d", distro, "--", "which", name)
+	probeCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(probeCtx, "wsl.exe", "-d", distro, "--", "which", name)
+	platform.HideWindow(cmd)
 	cmd.Env = append(os.Environ(), "WSL_UTF8=1")
 	output, err := cmd.Output()
 	if err == nil {
-		if value := trimWSLOutput(string(output)); value != "" {
+		if value := trimWSLOutput(string(output)); value != "" && !isWindowsInteropPath(value) {
 			return value, nil
 		}
 	}
@@ -545,7 +595,8 @@ func (m *Manager) wslWhich(ctx context.Context, distro, name string) (string, er
 		"/bin/" + name,
 		"/snap/bin/" + name,
 	} {
-		stat := exec.CommandContext(ctx, "wsl.exe", "-d", distro, "--", "stat", "-L", "-c", "%n", candidate)
+		stat := exec.CommandContext(probeCtx, "wsl.exe", "-d", distro, "--", "stat", "-L", "-c", "%n", candidate)
+		platform.HideWindow(stat)
 		stat.Env = append(os.Environ(), "WSL_UTF8=1")
 		if stat.Run() == nil {
 			return candidate, nil
@@ -554,14 +605,68 @@ func (m *Manager) wslWhich(ctx context.Context, distro, name string) (string, er
 	return "", fmt.Errorf("which %s failed", name)
 }
 
+// trimWSLOutput normalizes text produced by wsl.exe and drops diagnostics the
+// bridge writes to the command's standard output. Newer WSL versions emit a
+// localhost-proxy warning there on every invocation; treating it as command
+// output corrupts paths, user names, versions and IDs.
 func trimWSLOutput(value string) string {
+	return stripWSLDiagnostics(value)
+}
+
+func stripWSLDiagnostics(value string) string {
+	return stripWSLText(value, isWSLDiagnosticLine)
+}
+
+// stripWSLProxyNoise removes only the localhost-proxy notice. Genuine WSL
+// errors also start with "wsl:" and must stay visible.
+func stripWSLProxyNoise(value string) string {
+	return stripWSLText(value, isWSLProxyWarning)
+}
+
+func stripWSLText(value string, drop func(string) bool) string {
 	value = strings.ReplaceAll(value, "\x00", "")
 	value = strings.ReplaceAll(value, "\r\n", "\n")
-	return strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "\ufeff")
+	lines := strings.Split(value, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if drop(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+func isWSLDiagnosticLine(line string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "wsl:")
+}
+
+func isWSLProxyWarning(line string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(line))
+	if !strings.HasPrefix(trimmed, "wsl:") || !strings.Contains(trimmed, "localhost") {
+		return false
+	}
+	return strings.Contains(trimmed, "proxy") || strings.Contains(trimmed, "代理")
+}
+
+// isWindowsInteropPath reports whether p is a Windows drive mounted into WSL
+// (/mnt/c/...). WSL appends Windows directories to PATH by default, so `which`
+// can return a Windows executable or npm/yarn shim. Those are not Linux
+// runtime tools and must never be selected for a WSL workspace.
+func isWindowsInteropPath(p string) bool {
+	if len(p) < 7 || !strings.HasPrefix(p, "/mnt/") || p[6] != '/' {
+		return false
+	}
+	c := p[5]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // ToWSLPath converts a Windows host path to its WSL2 mount path.
 func ToWSLPath(hostPath string) (string, error) {
+	if strings.ContainsAny(hostPath, "\x00\r\n") {
+		return "", fmt.Errorf("无法把 %q 映射为 WSL 路径: 路径包含控制字符", hostPath)
+	}
 	cleaned := filepath.Clean(hostPath)
 	for _, prefix := range []string{`\\wsl.localhost\`, `\\wsl$\`} {
 		if strings.HasPrefix(cleaned, prefix) {

@@ -116,6 +116,10 @@ func TestSettingsReadAndUpdate(t *testing.T) {
 	if snapshot.Paths.ConfigFile == "" {
 		t.Fatalf("config_file is empty")
 	}
+	// An empty restart list must encode as [] so the UI can call .length safely.
+	if !strings.Contains(string(body), `"restart_required":[]`) {
+		t.Fatalf("restart_required should be an empty array, body = %s", body)
+	}
 
 	resp, body = stack.do(http.MethodPatch, "/api/v1/settings", map[string]any{
 		"network": map[string]any{"api_port": 18080},

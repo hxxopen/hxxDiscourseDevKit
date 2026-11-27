@@ -205,6 +205,10 @@ func cmdWorkspaceCreate(ctx context.Context, g Globals, args []string) int {
 	fs.SetOutput(os.Stderr)
 	description := fs.String("description", "", "Workspace 描述")
 	projectType := fs.String("project-type", "", "项目类型，例如 discourse")
+	profileID := fs.String("profile", "", "Project Profile ID，例如 discourse-official")
+	repositoryURL := fs.String("repo", "", "覆盖模板的源码仓库地址")
+	branch := fs.String("branch", "", "覆盖模板的源码分支")
+	acceptProfile := fs.Bool("accept-profile", false, "确认使用未验证的第三方模板")
 	fs.Usage = func() { printWorkspaceUsage(os.Stderr) }
 	if err := parseFlags(fs, args); err != nil {
 		return 2
@@ -219,7 +223,15 @@ func cmdWorkspaceCreate(ctx context.Context, g Globals, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	req := workspace.CreateRequest{Name: name, Description: *description, ProjectType: *projectType}
+	req := workspace.CreateRequest{
+		Name:          name,
+		Description:   *description,
+		ProjectType:   *projectType,
+		ProfileID:     *profileID,
+		RepositoryURL: *repositoryURL,
+		Branch:        *branch,
+		AcceptProfile: *acceptProfile,
+	}
 	var created workspace.Workspace
 	if err := client.Post(ctx, "/api/v1/workspaces", req, &created); err != nil {
 		return fail(err)
@@ -229,9 +241,19 @@ func cmdWorkspaceCreate(ctx context.Context, g Globals, args []string) int {
 	}
 	fmt.Printf("已创建 Workspace %q\n", created.Name)
 	fmt.Printf("  ID:       %s\n", created.WorkspaceID)
+	if created.ProfileID != "" {
+		fmt.Printf("  Profile:  %s\n", created.ProfileID)
+	}
 	fmt.Printf("  HTTP:     http://%s:%d\n", created.Network.Host, created.Network.HTTPPort)
 	fmt.Printf("  数据库:   %s\n", created.Database.DatabaseName)
 	fmt.Printf("  Redis DB: %d\n", created.Redis.DBIndex)
+	if created.Source.RepositoryURL != "" {
+		fmt.Printf("  源码:     %s", created.Source.RepositoryURL)
+		if created.Source.Branch != "" {
+			fmt.Printf(" @ %s", created.Source.Branch)
+		}
+		fmt.Println()
+	}
 	fmt.Printf("\n使用 hxxddk workspace use %q 切换活动 Workspace。\n", created.Name)
 	return 0
 }

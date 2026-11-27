@@ -1,10 +1,11 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import {
   isTerminalTask,
   useProject,
   useProjectLogs,
+  useSettings,
   useTask,
   useWorkspaces,
 } from '../api/hooks'
@@ -58,6 +59,7 @@ const actionLabels: Record<ProjectAction['kind'], string> = {
 export function Project() {
   const queryClient = useQueryClient()
   const workspaces = useWorkspaces()
+  const settings = useSettings()
   const [selectedId, setSelectedId] = useState('')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [taskId, setTaskId] = useState<string | null>(null)
@@ -149,6 +151,29 @@ export function Project() {
       submodules: workspace.source.submodules,
     })
   }, [workspace?.workspace_id])
+
+  // Prefill the default Discourse repository for workspaces without a saved
+  // source. This only fills the form; cloning/installing remains an explicit
+  // user action.
+  const defaultRepositoryURL = settings.data?.config.project.default_repository_url ?? ''
+  const prefilledFor = useRef('')
+  useEffect(() => {
+    if (!workspace || !defaultRepositoryURL) {
+      return
+    }
+    if (prefilledFor.current === workspace.workspace_id) {
+      return
+    }
+    prefilledFor.current = workspace.workspace_id
+    if (workspace.source.repository_url) {
+      return
+    }
+    setSourceDraft((current) =>
+      current.repository_url?.trim()
+        ? current
+        : { ...current, repository_url: defaultRepositoryURL },
+    )
+  }, [workspace, defaultRepositoryURL])
 
   const sourceMutation = useMutation({
     mutationFn: (input: ProjectSourceInput) => api.updateProjectSource(currentId, input),
@@ -550,7 +575,11 @@ function SourceCard({
         subtitle="仓库地址与版本选择保存在 Workspace 中；分支、标签、提交按优先级生效。"
       />
       <div className="space-y-4 px-5 py-4">
-        <Field label="仓库地址" htmlFor="project-repo" hint="必须使用 HTTPS 或本地路径；不接受包含凭据的 URL。">
+        <Field
+          label="仓库地址"
+          htmlFor="project-repo"
+          hint="默认填入设置的 Discourse 官方仓库；可修改或清空。仅点击「克隆源码」时才会下载。"
+        >
           <input
             id="project-repo"
             className={inputClass}

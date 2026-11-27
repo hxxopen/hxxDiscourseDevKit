@@ -68,6 +68,19 @@ func Main(args []string) int {
 			return 2
 		}
 		return cmdProject(ctx, globals, rest[1], rest[2:])
+	case "profile":
+		if len(rest) < 2 {
+			printProfileUsage(os.Stderr)
+			return 2
+		}
+		if rest[1] == "source" {
+			if len(rest) < 3 {
+				printProfileUsage(os.Stderr)
+				return 2
+			}
+			return cmdProfileSource(ctx, globals, rest[2], rest[3:])
+		}
+		return cmdProfile(ctx, globals, rest[1], rest[2:])
 	case "service":
 		if len(rest) < 2 {
 			printServiceUsage(os.Stderr)
@@ -86,6 +99,12 @@ func Main(args []string) int {
 			return 2
 		}
 		return cmdBackup(ctx, globals, rest[1], rest[2:])
+	case "audit":
+		if len(rest) < 2 {
+			printAuditUsage(os.Stderr)
+			return 2
+		}
+		return cmdAudit(ctx, globals, rest[1], rest[2:])
 	case "plugin", "theme":
 		kind := extension.Kind(rest[0])
 		if len(rest) < 2 {
@@ -240,12 +259,18 @@ func printUsage(w io.Writer) {
   workspace delete <name|id>  删除 Workspace（需预览确认）
   start | stop | restart [ws] 启动、停止或重启 Workspace 项目
   project ...                 源码、初始化、状态与日志
+  profile list|show|check     查看 Project Profile 与依赖预检
+  profile source ...          管理第三方 Project Profile 来源
   backup ...                  创建、查看与恢复备份
-  plugin list|create ...      管理 Discourse 插件脚手架
-  theme list|create ...       管理 Discourse 主题脚手架
+  audit list                  查看操作审计记录
+  plugin list|create|check|test|package
+                               管理 Discourse 插件、依赖检查、自动化测试与分发包
+  theme list|create|check|build|preview|package
+                               管理 Discourse 主题、依赖检查、构建与本地预览
   daemon run                  在前台运行 devkitd
   service list|start|stop ... 管理 PostgreSQL 与 Redis
-  runtime list|verify         查看 Runtime 组件矩阵
+  runtime list|verify|wsl     查看 Runtime 组件矩阵与 WSL2 环境
+  runtime install             预览并安装组件到 WSL2
 
 全局参数:
   --root DIR    指定实例根目录（默认按平台用户数据目录）
@@ -262,6 +287,10 @@ func printWorkspaceUsage(w io.Writer) {
   create [flags] <name>        创建 Workspace
       --description TEXT
       --project-type TYPE
+      --profile ID             使用 Project Profile 的默认项目类型与源码
+      --repo URL               覆盖模板的源码仓库地址
+      --branch NAME            覆盖模板的源码分支
+      --accept-profile         确认已查看未验证第三方模板的来源、操作与权限
   use <name|id>                切换活动 Workspace
   inspect <name|id>            查看详情
   provision <name|id>          重试创建 Workspace 数据库
@@ -273,6 +302,23 @@ func printWorkspaceUsage(w io.Writer) {
       --delete-data            删除数据与备份
       --delete-database        删除该 Workspace 的数据库与角色
       --delete-redis           清空该 Workspace 使用的 Redis DB
+`)
+}
+
+func printProfileUsage(w io.Writer) {
+	fmt.Fprint(w, `用法: hxxddk profile <子命令>
+
+  list                         列出内置与第三方 Project Profile
+  show <id>                    查看模板来源、操作、权限与默认值
+  check <id>                   运行依赖预检（Runtime、服务与源码）
+  source list                  列出第三方模板来源
+  source add [--branch NAME] <本地目录|Git URL>
+                               注册模板来源（只读取 devkit-profiles.json）
+  source refresh <id>          重新加载来源清单或拉取 Git 更新
+  source remove [--yes] <id>   注销来源（Git 来源的检出目录会删除）
+
+使用未验证的第三方模板创建 Workspace 时，需要 --accept-profile 确认。
+预检存在 Runtime 错误时命令返回退出码 1，但不会阻止之后修复环境。
 `)
 }
 
@@ -291,7 +337,7 @@ func printProjectUsage(w io.Writer) {
   checkout <ref> [--force]     切换分支、标签或提交
   init [--skip-deps] [--skip-db]
                                安装依赖并准备数据库
-  logs [--source project|init|git] [--tail N]
+  logs [--source project|init|git|test] [--tail N]
                                查看项目日志
 
 未指定 --workspace 时使用活动 Workspace。start、stop、restart 也可直接指定

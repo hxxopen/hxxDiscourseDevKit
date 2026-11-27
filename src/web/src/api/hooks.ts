@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { api } from './client'
-import type { ExtensionKind, ServiceName, Task } from './types'
+import type { AuditFilter, ExtensionKind, ServiceName, Task } from './types'
 
 export function isTerminalTask(status: Task['status']): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'canceled'
@@ -20,6 +20,32 @@ export function useWorkspaces() {
     queryKey: ['workspaces'],
     queryFn: api.workspaces,
     refetchInterval: 10_000,
+  })
+}
+
+export function useProfiles() {
+  return useQuery({
+    queryKey: ['profiles'],
+    queryFn: api.profiles,
+    staleTime: 5 * 60_000,
+  })
+}
+
+export function useProfileSources() {
+  return useQuery({
+    queryKey: ['profile-sources'],
+    queryFn: api.profileSources,
+    staleTime: 30_000,
+  })
+}
+
+export function useProfileCheck(profileId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ['profile-check', profileId],
+    queryFn: () => api.profileCheck(profileId as string),
+    enabled: enabled && Boolean(profileId),
+    staleTime: 30_000,
+    retry: false,
   })
 }
 
@@ -55,6 +81,23 @@ export function useLog(source: string | null, tail: number, live: boolean) {
     refetchInterval: live ? 3_000 : false,
     staleTime: 0,
     gcTime: 0,
+  })
+}
+
+export function useAudit(filter: AuditFilter, live: boolean) {
+  return useQuery({
+    queryKey: [
+      'audit',
+      filter.limit,
+      filter.action,
+      filter.workspaceId,
+      filter.result,
+      filter.since,
+    ],
+    queryFn: () => api.audit(filter),
+    refetchInterval: live ? 10_000 : false,
+    staleTime: 0,
+    placeholderData: (previous) => previous,
   })
 }
 
@@ -157,6 +200,12 @@ export function useRuntimeComponents() {
     queryKey: ['runtime-components'],
     queryFn: api.runtimeComponents,
     staleTime: 30_000,
+    // Component verification can change outside the page (daemon restart,
+    // runtime install/upgrade). Keep it in sync while the page stays open
+    // instead of showing a stale "未就绪" next to a running service.
+    refetchInterval: 60_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
   })
 }
 
@@ -165,6 +214,16 @@ export function useRuntimeMatrix() {
     queryKey: ['runtime-matrix'],
     queryFn: api.runtimeMatrix,
     staleTime: 60_000,
+  })
+}
+
+export function useWSLStatus(enabled = true) {
+  return useQuery({
+    queryKey: ['runtime-wsl'],
+    queryFn: api.runtimeWSL,
+    enabled,
+    staleTime: 15_000,
+    retry: false,
   })
 }
 

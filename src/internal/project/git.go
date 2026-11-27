@@ -42,20 +42,20 @@ func (m *Manager) Clone(ctx context.Context, ref string, input SourceInput, prog
 	if isRunning(ws) || m.processes.Alive(ws.WorkspaceID) {
 		return ErrAlreadyRunning
 	}
-	if ws.Source.Installed {
-		return fmt.Errorf("%w: 已检出源码；请使用 fetch、pull 或 checkout", ErrSourceInstalled)
-	}
 
 	next, _, _, err := applySourceInput(ws.Source, input)
 	if err != nil {
 		return err
 	}
+	// Decide from the directory, not the persisted flag. The flag can go stale
+	// if the checkout is removed by hand; trusting it would either reject a
+	// clone into an empty directory or overwrite an existing checkout.
 	sourceDir := m.sourcePath(ws)
-	empty, err := isEmptyDir(sourceDir)
-	if err != nil {
-		return err
+	installed, isGit := sourcePresence(sourceDir)
+	if isGit {
+		return fmt.Errorf("%w: 已检出源码；请使用 fetch、pull 或 checkout", ErrSourceInstalled)
 	}
-	if !empty {
+	if installed {
 		return fmt.Errorf("%w: %s", ErrSourceNotEmpty, sourceDir)
 	}
 
@@ -351,16 +351,14 @@ func (m *Manager) lockedWorkspace(ctx context.Context, ref string) (*workspace.W
 }
 
 func (m *Manager) requireGitSource(ws *workspace.Workspace) error {
-	if !ws.Source.Installed {
+	// Match Status: the checkout on disk is authoritative. A stale
+	// source.installed flag must not make the UI enable fetch/pull for an
+	// empty directory, nor hide a checkout that exists without the flag.
+	installed, isGit := sourcePresence(m.sourcePath(ws))
+	if !installed {
 		return ErrSourceMissing
 	}
-	dir := m.sourcePath(ws)
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
-		return ErrSourceMissing
-	}
-	gitDir, err := os.Stat(filepath.Join(dir, ".git"))
-	if err != nil || !gitDir.IsDir() {
+	if !isGit {
 		return ErrNotGitRepository
 	}
 	return nil

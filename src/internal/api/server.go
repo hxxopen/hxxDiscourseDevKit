@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -10,39 +11,53 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hxx/hxxDiscourseDevKit/internal/audit"
 	"github.com/hxx/hxxDiscourseDevKit/internal/backup"
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
 	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/httpx"
+	"github.com/hxx/hxxDiscourseDevKit/internal/profile"
 	"github.com/hxx/hxxDiscourseDevKit/internal/project"
 	"github.com/hxx/hxxDiscourseDevKit/internal/runtime"
 	"github.com/hxx/hxxDiscourseDevKit/internal/secret"
 	"github.com/hxx/hxxDiscourseDevKit/internal/service"
 	"github.com/hxx/hxxDiscourseDevKit/internal/task"
+	"github.com/hxx/hxxDiscourseDevKit/internal/themepreview"
 	"github.com/hxx/hxxDiscourseDevKit/internal/workspace"
 )
 
+// ThemePreviewer builds and imports a theme into the workspace's local
+// Discourse instance.
+type ThemePreviewer interface {
+	Preview(ctx context.Context, workspaceRef, slug, apiKey string) (*themepreview.Result, error)
+}
+
 // Options supplies the API server's dependencies.
 type Options struct {
-	Paths       *config.Paths
-	Config      *config.Store
-	Secrets     *secret.Store
-	Workspaces  *workspace.Manager
-	Runtime     *runtime.Manager
-	Services    *service.Manager
-	Project     *project.Manager
-	Backups     *backup.Manager
-	Extensions  *extension.Manager
-	Tasks       *task.Manager
-	Diagnostics *diagnostics.Service
-	UI          fs.FS
-	Logger      *slog.Logger
-	Dev         bool
-	APIPort     int
-	APIAddr     string
-	StartedAt   time.Time
-	SetLogLevel func(level string)
+	Paths            *config.Paths
+	Config           *config.Store
+	Secrets          *secret.Store
+	Workspaces       *workspace.Manager
+	Runtime          *runtime.Manager
+	Services         *service.Manager
+	Project          *project.Manager
+	PluginTests      PluginTestRunner
+	Backups          *backup.Manager
+	Audit            *audit.Logger
+	Extensions       *extension.Manager
+	ThemePreview     ThemePreviewer
+	Profiles         *profile.Catalog
+	Tasks            *task.Manager
+	Diagnostics      *diagnostics.Service
+	StorageMigration StorageMigrator
+	UI               fs.FS
+	Logger           *slog.Logger
+	Dev              bool
+	APIPort          int
+	APIAddr          string
+	StartedAt        time.Time
+	SetLogLevel      func(level string)
 }
 
 // Server handles HTTP management requests.
@@ -99,21 +114,36 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/system/session", s.handleSession)
 
 	auth := func(pattern string, handler http.HandlerFunc) {
-		mux.Handle(pattern, s.auth(handler))
+		mux.Handle(pattern, s.withAudit(pattern, s.auth(s.maintenance(handler))))
 	}
 
 	auth("GET /api/v1/system/info", s.handleInfo)
 	auth("GET /api/v1/diagnostics", s.handleDiagnostics)
 	auth("GET /api/v1/settings", s.handleGetSettings)
 	auth("PATCH /api/v1/settings", s.handleUpdateSettings)
+	auth("PUT /api/v1/settings/theme-preview", s.handleSetThemePreviewKey)
+	auth("DELETE /api/v1/settings/theme-preview", s.handleClearThemePreviewKey)
+	auth("POST /api/v1/settings/storage/migration/preview", s.handlePreviewStorageMigration)
+	auth("POST /api/v1/settings/storage/migration", s.handleStartStorageMigration)
 
 	auth("GET /api/v1/logs/sources", s.handleListLogSources)
 	auth("GET /api/v1/logs", s.handleReadLog)
+
+	auth("GET /api/v1/audit", s.handleListAudit)
 
 	auth("GET /api/v1/events", s.handleEvents)
 	auth("GET /api/v1/tasks", s.handleListTasks)
 	auth("GET /api/v1/tasks/{id}", s.handleGetTask)
 	auth("POST /api/v1/tasks/{id}/cancel", s.handleCancelTask)
+
+	auth("GET /api/v1/profiles", s.handleListProfiles)
+	auth("GET /api/v1/profiles/{id}", s.handleGetProfile)
+	auth("GET /api/v1/profiles/{id}/check", s.handleCheckProfile)
+
+	auth("GET /api/v1/profile-sources", s.handleListProfileSources)
+	auth("POST /api/v1/profile-sources", s.handleAddProfileSource)
+	auth("POST /api/v1/profile-sources/{id}/refresh", s.handleRefreshProfileSource)
+	auth("DELETE /api/v1/profile-sources/{id}", s.handleRemoveProfileSource)
 
 	auth("GET /api/v1/workspaces", s.handleListWorkspaces)
 	auth("POST /api/v1/workspaces", s.handleCreateWorkspace)
@@ -140,8 +170,17 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	auth("GET /api/v1/workspaces/{id}/plugins", s.handleListPlugins)
 	auth("POST /api/v1/workspaces/{id}/plugins", s.handleCreatePlugin)
+	auth("GET /api/v1/workspaces/{id}/plugins/{slug}/check", s.handleCheckPlugin)
+	auth("POST /api/v1/workspaces/{id}/plugins/{slug}/test", s.handleTestPlugin)
+	auth("POST /api/v1/workspaces/{id}/plugins/{slug}/package", s.handlePackagePlugin)
+	auth("POST /api/v1/workspaces/{id}/plugins/{slug}/enable", s.handleEnablePlugin)
+	auth("POST /api/v1/workspaces/{id}/plugins/{slug}/disable", s.handleDisablePlugin)
 	auth("GET /api/v1/workspaces/{id}/themes", s.handleListThemes)
 	auth("POST /api/v1/workspaces/{id}/themes", s.handleCreateTheme)
+	auth("GET /api/v1/workspaces/{id}/themes/{slug}/check", s.handleCheckTheme)
+	auth("POST /api/v1/workspaces/{id}/themes/{slug}/package", s.handlePackageTheme)
+	auth("POST /api/v1/workspaces/{id}/themes/{slug}/build", s.handleBuildTheme)
+	auth("POST /api/v1/workspaces/{id}/themes/{slug}/preview", s.handlePreviewTheme)
 
 	auth("GET /api/v1/workspaces/{id}/backups", s.handleListBackups)
 	auth("POST /api/v1/workspaces/{id}/backups", s.handleCreateBackup)
@@ -154,6 +193,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	auth("GET /api/v1/runtime/components", s.handleListRuntimeComponents)
 	auth("GET /api/v1/runtime/components/{name}", s.handleGetRuntimeComponent)
 	auth("POST /api/v1/runtime/verify", s.handleVerifyRuntime)
+	auth("GET /api/v1/runtime/wsl", s.handleRuntimeWSL)
+	auth("POST /api/v1/runtime/discover", s.handleDiscoverRuntime)
+	auth("POST /api/v1/runtime/install-preview", s.handlePreviewRuntimeInstall)
+	auth("POST /api/v1/runtime/install", s.handleInstallRuntime)
 
 	auth("GET /api/v1/services", s.handleListServices)
 	auth("GET /api/v1/services/{name}", s.handleGetService)

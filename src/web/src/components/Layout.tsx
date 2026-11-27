@@ -11,6 +11,7 @@ export type Page =
   | 'runtime'
   | 'services'
   | 'logs'
+  | 'audit'
   | 'diagnostics'
   | 'settings'
 
@@ -24,6 +25,7 @@ const navItems: Array<{ id: Page; label: string; hint: string }> = [
   { id: 'runtime', label: '运行时', hint: '组件矩阵与验证' },
   { id: 'services', label: '服务', hint: 'PostgreSQL 与 Redis' },
   { id: 'logs', label: '日志', hint: 'DevKit、项目与服务日志' },
+  { id: 'audit', label: '审计', hint: '管理操作与拒绝记录' },
   { id: 'diagnostics', label: '诊断', hint: '环境健康检查' },
   { id: 'settings', label: '设置', hint: '路径、网络与默认值' },
 ]
@@ -111,6 +113,13 @@ function NavIcon({ page }: { page: Page }) {
           <path d="M8 9h8M8 13h8M8 17h5" />
         </svg>
       )
+    case 'audit':
+      return (
+        <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" {...common}>
+          <path d="M12 3 20 6v5c0 4.6-3.2 8.2-8 10-4.8-1.8-8-5.4-8-10V6l8-3Z" />
+          <path d="m8.5 12 2.3 2.3 4.7-4.7" />
+        </svg>
+      )
     case 'settings':
       return (
         <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" {...common}>
@@ -171,6 +180,7 @@ export function Layout({
                 <button
                   key={item.id}
                   type="button"
+                  data-testid={`nav-${item.id}`}
                   onClick={() => onNavigate(item.id)}
                   className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition ${
                     active
@@ -268,7 +278,9 @@ export function Layout({
             </div>
           </header>
 
-          <main className="px-4 py-6 sm:px-6 lg:px-8 lg:py-8">{children}</main>
+          <main data-testid="page-content" className="px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+            {children}
+          </main>
         </div>
       </div>
     </div>

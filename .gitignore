@@ -17,6 +17,11 @@ vendor/
 /src/web/dist/
 /src/web/.vite/
 
+# Playwright
+/src/web/test-results/
+/src/web/playwright-report/
+/src/web/blob-report/
+
 # Built UI is kept out of git; only the placeholder keeps go:embed happy.
 /src/internal/webembed/dist/*
 !/src/internal/webembed/dist/.keep

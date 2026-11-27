@@ -26,16 +26,167 @@ export interface PlatformInfo {
   is_wsl: boolean
 }
 
+export interface StorageInfo {
+  data_root: string
+  configured: boolean
+  split: boolean
+  legacy: boolean
+  data_root_pending: boolean
+  migrating: boolean
+  migration_task_id?: string
+}
+
+export interface StorageMigrationUnit {
+  id: string
+  kind: 'workspace' | 'service' | 'backup'
+  name: string
+  source: string
+  destination: string
+  action: 'copy' | 'skip' | 'blocked'
+  reason?: string
+  size_bytes: number
+}
+
+export interface StorageMigrationBlocker {
+  code: string
+  message: string
+  path?: string
+}
+
+export interface StorageWorkspaceStop {
+  workspace_id: string
+  name: string
+  state: string
+}
+
+export interface StorageServiceStop {
+  name: string
+  mode: string
+  state: string
+  action: string
+  reason?: string
+}
+
+export interface StorageMigrationPlan {
+  eligible: boolean
+  reason?: string
+  source_root: string
+  source_data_root: string
+  target_root: string
+  distro?: string
+  legacy: boolean
+  units: StorageMigrationUnit[]
+  workspaces: StorageWorkspaceStop[]
+  services: StorageServiceStop[]
+  warnings: string[]
+  blockers: StorageMigrationBlocker[]
+  total_bytes: number
+  checked_at: string
+  confirm_token?: string
+  expires_at?: string
+}
+
 export interface Info {
   version: VersionInfo
   instance_id: string
   root: string
+  storage: StorageInfo
   api_addr: string
   started_at: string
   platform: PlatformInfo
   active_workspace_id: string
   workspace_count: number
   capabilities: Record<string, boolean>
+}
+
+export interface ProfileOrigin {
+  type: string
+  name: string
+  url?: string
+  version?: string
+  source_id?: string
+  verified: boolean
+}
+
+export interface ProfileOperation {
+  id: string
+  title: string
+  description: string
+  destructive: boolean
+}
+
+export interface ProfilePermission {
+  id: string
+  title: string
+  description: string
+  risk: string
+}
+
+export interface ProjectProfile {
+  id: string
+  name: string
+  description: string
+  category: string
+  project_type: string
+  default_repository_url?: string
+  default_branch?: string
+  source_required: boolean
+  extension_kind?: string
+  runtime_components: string[]
+  services: string[]
+  operations: ProfileOperation[]
+  permissions: ProfilePermission[]
+  origin: ProfileOrigin
+}
+
+export interface ProfileList {
+  items: ProjectProfile[]
+  total: number
+}
+
+export interface ProfileSource {
+  id: string
+  kind: 'local' | 'git'
+  name: string
+  location: string
+  branch?: string
+  version?: string
+  commit?: string
+  profile_ids: string[]
+  added_at: string
+  last_loaded_at?: string | null
+  last_error?: string
+}
+
+export interface ProfileSourceList {
+  items: ProfileSource[]
+  total: number
+}
+
+export interface ProfileSourceInput {
+  location: string
+  branch?: string
+}
+
+export type ProfileCheckStatus = 'ok' | 'info' | 'warning' | 'error'
+
+export interface ProfileCheck {
+  id: string
+  title: string
+  status: ProfileCheckStatus
+  required: boolean
+  message: string
+  fix_action?: string
+}
+
+export interface ProfileCheckReport {
+  profile_id: string
+  profile_name: string
+  generated_at: string
+  checks: ProfileCheck[]
+  ready: boolean
+  error_count: number
+  warning_count: number
 }
 
 export interface SourceConfig {
@@ -84,6 +235,7 @@ export interface Workspace {
   name: string
   description: string
   project_type: string
+  profile_id?: string
   state: WorkspaceState
   last_error: string
   created_at: string
@@ -129,6 +281,10 @@ export interface CreateWorkspaceInput {
   name: string
   description?: string
   project_type?: string
+  profile_id?: string
+  repository_url?: string
+  branch?: string
+  accept_profile?: boolean
 }
 
 export interface DiagnosticCheck {
@@ -311,6 +467,62 @@ export interface RuntimeComponentsResponse {
   builtin?: boolean
 }
 
+export interface WSLStatus {
+  supported: boolean
+  available: boolean
+  distro?: string
+  distros?: string[]
+  kernel?: string
+  os_name?: string
+  os_id?: string
+  os_like?: string
+  os_version?: string
+  user?: string
+  home?: string
+  root_available: boolean
+  error?: string
+  checked_at: string
+}
+
+export interface RuntimeInstallComponent {
+  name: string
+  package: string
+  required: boolean
+  installed: boolean
+  version?: string
+  execution?: string
+  message?: string
+}
+
+export interface RuntimeInstallCommand {
+  label: string
+  preview: string
+}
+
+export interface RuntimeInstallPlan {
+  supported: boolean
+  available: boolean
+  distro?: string
+  os_name?: string
+  os_id?: string
+  os_version?: string
+  root_available: boolean
+  components: RuntimeInstallComponent[]
+  packages: string[]
+  commands: RuntimeInstallCommand[]
+  warnings?: string[]
+  confirm_token?: string
+  expires_at?: string
+  checked_at: string
+}
+
+export interface RuntimeDiscoverResponse {
+  components: Record<string, { path: string; execution: string; version?: string; detected_at: string }>
+  names: string[]
+  total: number
+  updated_at: string
+}
+
 export interface ProjectSourceStatus {
   configured: boolean
   installed: boolean
@@ -484,6 +696,7 @@ export interface ExtensionItem {
   authors: string
   url?: string
   path: string
+  enabled: boolean
   has_metadata: boolean
   file_count: number
   modified_at: string
@@ -507,6 +720,64 @@ export interface ExtensionCreateInput {
   authors?: string
 }
 
+export interface ExtensionPackage {
+  kind: ExtensionKind
+  slug: string
+  name: string
+  version: string
+  file_name: string
+  path: string
+  size_bytes: number
+  sha256: string
+  file_count: number
+  created_at: string
+}
+
+export type ExtensionFindingStatus = 'ok' | 'warning' | 'error' | 'skipped'
+
+export interface ExtensionFinding {
+  id: string
+  title: string
+  status: ExtensionFindingStatus
+  message: string
+  required: boolean
+  fix?: string
+}
+
+export interface ExtensionCheckReport {
+  workspace_id: string
+  kind: ExtensionKind
+  slug: string
+  name: string
+  path: string
+  enabled: boolean
+  ready: boolean
+  source_installed: boolean
+  discourse_version?: string
+  required_version?: string
+  maximum_version?: string
+  error_count: number
+  warning_count: number
+  findings: ExtensionFinding[]
+  checked_at: string
+}
+
+export interface ThemeBuildResult {
+  ready: boolean
+  message: string
+  check: ExtensionCheckReport
+  package?: ExtensionPackage
+}
+
+export interface ThemePreviewResult {
+  build: ThemeBuildResult
+  site_url?: string
+  preview_url?: string
+  admin_url?: string
+  theme_id?: number
+  action?: 'created' | 'updated'
+}
+
 export interface DevKitConfig {
   schema_version: number
   instance_id: string
@@ -522,6 +793,9 @@ export interface DevKitConfig {
     default_profile: string
     matrix_file: string
     wsl_distro?: string
+  }
+  storage: {
+    data_root?: string
   }
   project: {
     default_repository_url: string
@@ -544,20 +818,63 @@ export interface DevKitConfig {
 
 export interface SettingsPaths {
   root: string
+  data_root: string
+  data_root_split: boolean
+  data_root_legacy: boolean
+  data_root_pending: boolean
   config_file: string
   config_dir: string
   workspaces_dir: string
+  profile_sources_file: string
+  profile_sources_dir: string
   runtime_dir: string
   services_dir: string
   logs_dir: string
+  audit_dir: string
   backups_dir: string
   tmp_dir: string
+}
+
+export type AuditResult = 'success' | 'accepted' | 'failure'
+
+export interface AuditEvent {
+  id: string
+  timestamp: string
+  action: string
+  result: AuditResult
+  status: number
+  method: string
+  path: string
+  workspace_id?: string
+  target?: string
+  client: string
+  actor: string
+  request_id?: string
+  remote_addr?: string
+  duration_ms: number
+}
+
+export interface AuditList {
+  items: AuditEvent[]
+  total: number
+  limit: number
+}
+
+export interface AuditFilter {
+  limit?: number
+  action?: string
+  workspaceId?: string
+  result?: AuditResult | ''
+  since?: string
 }
 
 export interface SettingsResponse {
   config: DevKitConfig
   paths: SettingsPaths
   restart_required: string[]
+  theme_preview: {
+    api_key_configured: boolean
+  }
 }
 
 export interface SettingsInput {

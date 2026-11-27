@@ -48,6 +48,9 @@ var (
 	ErrNotInstalled   = errors.New("service components are not installed")
 	ErrNotRunning     = errors.New("service is not running")
 	ErrValidation     = errors.New("service configuration is invalid")
+	// ErrDataDirUnsupported means the configured data directory cannot work in
+	// the execution environment, e.g. PostgreSQL on a WSL DrvFS mount.
+	ErrDataDirUnsupported = errors.New("service data directory is not supported")
 )
 
 // Status is the live state of one shared service.

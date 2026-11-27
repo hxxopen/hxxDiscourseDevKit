@@ -64,6 +64,7 @@ type Executor struct{}
 // Run executes a command and waits for it to finish.
 func (Executor) Run(ctx context.Context, spec ExecSpec) (ExecResult, error) {
 	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
+	HideWindow(cmd)
 	cmd.Dir = spec.Dir
 	if spec.Env != nil {
 		cmd.Env = spec.Env

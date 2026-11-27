@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,6 +26,10 @@ import (
 func TestDaemonEndToEnd(t *testing.T) {
 	port := freePort(t)
 	root := t.TempDir()
+	// Keep test data inside the temporary root. Without an explicit data_root,
+	// a fresh Windows instance uses the shared WSL2 user data directory, which
+	// would make this test depend on (and write to) the developer's real data.
+	writeInstanceConfig(t, root)
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -379,6 +385,23 @@ func assertSSEReady(t *testing.T, c *e2eClient) {
 	}
 	if strings.TrimSpace(line) != "event: ready" {
 		t.Fatalf("unexpected first SSE frame: %q", line)
+	}
+}
+
+func writeInstanceConfig(t *testing.T, root string) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"storage": map[string]string{"data_root": root},
+	})
+	if err != nil {
+		t.Fatalf("marshal test config: %v", err)
+	}
+	dir := filepath.Join(root, "config")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "devkit.json"), payload, 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
 	}
 }
 

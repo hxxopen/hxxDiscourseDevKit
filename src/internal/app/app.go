@@ -11,23 +11,29 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hxx/hxxDiscourseDevKit/internal/api"
+	"github.com/hxx/hxxDiscourseDevKit/internal/audit"
 	"github.com/hxx/hxxDiscourseDevKit/internal/backup"
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
 	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/logging"
+	"github.com/hxx/hxxDiscourseDevKit/internal/migration"
 	"github.com/hxx/hxxDiscourseDevKit/internal/platform"
 	"github.com/hxx/hxxDiscourseDevKit/internal/process"
+	"github.com/hxx/hxxDiscourseDevKit/internal/profile"
 	"github.com/hxx/hxxDiscourseDevKit/internal/project"
 	"github.com/hxx/hxxDiscourseDevKit/internal/runtime"
 	"github.com/hxx/hxxDiscourseDevKit/internal/secret"
 	"github.com/hxx/hxxDiscourseDevKit/internal/service"
 	"github.com/hxx/hxxDiscourseDevKit/internal/store"
 	"github.com/hxx/hxxDiscourseDevKit/internal/task"
+	"github.com/hxx/hxxDiscourseDevKit/internal/themepreview"
 	"github.com/hxx/hxxDiscourseDevKit/internal/version"
 	"github.com/hxx/hxxDiscourseDevKit/internal/webembed"
 	"github.com/hxx/hxxDiscourseDevKit/internal/workspace"
@@ -57,7 +63,7 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 	paths := config.NewPaths(root)
-	if err := paths.Ensure(); err != nil {
+	if err := paths.EnsureBase(); err != nil {
 		return err
 	}
 
@@ -70,6 +76,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer func() { _ = lock.Release() }()
 
+	freshInstance := !config.ConfigExists(paths)
 	cfgStore, err := config.Open(paths)
 	if err != nil {
 		return err
@@ -88,12 +95,24 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer func() { _ = logProvider.Close() }()
 
+	auditLogger, err := audit.New(paths.AuditDir, cfg.Logging.RetentionDays)
+	if err != nil {
+		return err
+	}
+
 	logger := logProvider.Logger().With("module", "app")
 	logger.Info("devkit starting",
 		"version", version.Version,
 		"root", root,
 		"api_port", cfg.Network.APIPort,
 	)
+
+	runtimeManager := runtime.New(paths, cfgStore,
+		logProvider.Logger().With("module", "runtime"))
+	if err := applyDataRoot(ctx, paths, cfgStore, runtimeManager, freshInstance, logger); err != nil {
+		return err
+	}
+	cfg = cfgStore.Get()
 
 	secrets, err := secret.Open(paths.SecretsFile())
 	if err != nil {
@@ -107,8 +126,6 @@ func Run(ctx context.Context, opts Options) error {
 	workspaces := workspace.New(paths, cfgStore, secrets,
 		logProvider.Logger().With("module", "workspace"),
 		workspace.Options{PortStart: 3000, BindHost: cfg.Network.Host})
-	runtimeManager := runtime.New(paths, cfgStore,
-		logProvider.Logger().With("module", "runtime"))
 	serviceManager := service.New(paths, cfgStore, secrets, runtimeManager,
 		logProvider.Logger().With("module", "service"), service.Options{
 			Dependencies: workspaces.RunningNames,
@@ -127,6 +144,13 @@ func Run(ctx context.Context, opts Options) error {
 		logProvider.Logger().With("module", "backup"))
 	extensionManager := extension.New(paths, workspaces,
 		logProvider.Logger().With("module", "extension"))
+	themePreview := themepreview.New(paths, workspaces, extensionManager,
+		logProvider.Logger().With("module", "theme-preview"))
+	profiles := profile.New(runtimeManager, serviceManager)
+	if err := profiles.EnableSources(paths.ProfileSourcesFile(), paths.ProfileSourcesDir,
+		profileGitFetcher{runtime: runtimeManager}); err != nil {
+		logger.Warn("third-party profile sources are unavailable", "error", err)
+	}
 
 	if err := workspaces.Reconcile(ctx); err != nil {
 		logger.Warn("workspace reconcile reported an error", "error", err)
@@ -143,6 +167,21 @@ func Run(ctx context.Context, opts Options) error {
 		logProvider.Logger().With("module", "diagnostics"),
 		diagnostics.Options{Runtime: runtimeManager, Services: serviceManager})
 
+	storageMigration := migration.New(migration.Options{
+		Paths:      paths,
+		Config:     cfgStore,
+		Runtime:    runtimeManager,
+		Workspaces: workspaces,
+		Projects:   projectManager,
+		Services:   serviceManager,
+		Tasks:      tasks,
+		Logger:     logProvider.Logger().With("module", "migration"),
+		Windows:    goruntime.GOOS == "windows",
+		NewCopier: func(distro string) migration.Copier {
+			return migration.NewWSLCopier(runtimeManager, distro)
+		},
+	})
+
 	port := opts.Port
 	if port == 0 {
 		port = cfg.Network.APIPort
@@ -154,24 +193,29 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	apiServer := api.New(api.Options{
-		Paths:       paths,
-		Config:      cfgStore,
-		Secrets:     secrets,
-		Workspaces:  workspaces,
-		Runtime:     runtimeManager,
-		Services:    serviceManager,
-		Project:     projectManager,
-		Backups:     backupManager,
-		Extensions:  extensionManager,
-		Tasks:       tasks,
-		Diagnostics: diag,
-		UI:          webembed.FS(),
-		Logger:      logProvider.Logger(),
-		Dev:         opts.Dev,
-		APIPort:     port,
-		APIAddr:     listener.Addr().String(),
-		StartedAt:   time.Now(),
-		SetLogLevel: logProvider.SetLevel,
+		Paths:            paths,
+		Config:           cfgStore,
+		Secrets:          secrets,
+		Workspaces:       workspaces,
+		Runtime:          runtimeManager,
+		Services:         serviceManager,
+		Project:          projectManager,
+		PluginTests:      projectManager,
+		Backups:          backupManager,
+		Audit:            auditLogger,
+		Extensions:       extensionManager,
+		ThemePreview:     themePreview,
+		Profiles:         profiles,
+		Tasks:            tasks,
+		Diagnostics:      diag,
+		StorageMigration: storageMigration,
+		UI:               webembed.FS(),
+		Logger:           logProvider.Logger(),
+		Dev:              opts.Dev,
+		APIPort:          port,
+		APIAddr:          listener.Addr().String(),
+		StartedAt:        time.Now(),
+		SetLogLevel:      logProvider.SetLevel,
 	})
 
 	httpServer := &http.Server{
@@ -225,6 +269,60 @@ func Run(ctx context.Context, opts Options) error {
 	tasks.Close()
 	logger.Info("devkit stopped")
 	return nil
+}
+
+// applyDataRoot selects where project and service data live. Fresh Windows
+// instances default to the WSL2 filesystem; existing instances keep their
+// legacy layout and are only reported as such.
+func applyDataRoot(ctx context.Context, paths *config.Paths, cfgStore *config.Store,
+	runtimeManager *runtime.Manager, fresh bool, logger *slog.Logger) error {
+	configured := strings.TrimSpace(cfgStore.Get().Storage.DataRoot)
+	if configured != "" {
+		if err := tryDataRoot(paths, configured); err != nil {
+			return fmt.Errorf("数据目录 %s 不可用: %w", configured, err)
+		}
+		logger.Info("using configured data root", "data_root", configured)
+		return nil
+	}
+
+	if fresh && goruntime.GOOS == "windows" {
+		probeCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		candidate, err := runtimeManager.DefaultDataRoot(probeCtx)
+		cancel()
+		switch {
+		case err != nil:
+			logger.Warn("WSL2 data root unavailable; using instance root",
+				"error", err, "root", paths.Root)
+		case tryDataRoot(paths, candidate) != nil:
+			logger.Warn("could not create WSL2 data directories; using instance root",
+				"data_root", candidate)
+			paths.SetDataRoot(paths.Root)
+		default:
+			if err := cfgStore.Update(func(next *config.Config) error {
+				next.Storage.DataRoot = candidate
+				return nil
+			}); err != nil {
+				logger.Warn("could not persist WSL2 data root; using instance root",
+					"data_root", candidate, "error", err)
+				paths.SetDataRoot(paths.Root)
+				return paths.EnsureDataDirs()
+			}
+			logger.Info("initialized WSL2 data root", "data_root", candidate)
+			return nil
+		}
+	}
+
+	if goruntime.GOOS == "windows" && !fresh && !paths.UsesSplitDataRoot() {
+		paths.LegacyDataRoot = true
+		logger.Warn("legacy data layout detected; data remains under the instance root",
+			"root", paths.Root)
+	}
+	return paths.EnsureDataDirs()
+}
+
+func tryDataRoot(paths *config.Paths, dataRoot string) error {
+	paths.SetDataRoot(dataRoot)
+	return paths.EnsureDataDirs()
 }
 
 // DiscardLogger is a helper for tests or commands that need a no-op logger.

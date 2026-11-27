@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Layout, type Page } from './components/Layout'
+import { Audit } from './pages/Audit'
 import { Backup } from './pages/Backup'
 import { Dashboard } from './pages/Dashboard'
 import { Diagnostics } from './pages/Diagnostics'
@@ -38,6 +39,9 @@ function parseHash(): Page {
   if (hash.startsWith('logs')) {
     return 'logs'
   }
+  if (hash.startsWith('audit')) {
+    return 'audit'
+  }
   if (hash.startsWith('settings')) {
     return 'settings'
   }
@@ -73,6 +77,7 @@ export default function App() {
       {page === 'runtime' ? <Runtime /> : null}
       {page === 'services' ? <Services /> : null}
       {page === 'logs' ? <Logs /> : null}
+      {page === 'audit' ? <Audit /> : null}
       {page === 'diagnostics' ? <Diagnostics /> : null}
       {page === 'settings' ? <Settings /> : null}
     </Layout>

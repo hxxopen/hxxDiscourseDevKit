@@ -1,8 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { ApiError, api } from '../api/client'
-import { isTerminalTask, useTask, useWorkspaceStatus, useWorkspaces } from '../api/hooks'
-import type { DeletePlan, TaskStatus, Workspace } from '../api/types'
+import {
+  isTerminalTask,
+  useProfileCheck,
+  useProfiles,
+  useTask,
+  useWorkspaceStatus,
+  useWorkspaces,
+} from '../api/hooks'
+import type { DeletePlan, ProfileCheckStatus, TaskStatus, Workspace } from '../api/types'
 import {
   Badge,
   Button,
@@ -53,6 +60,26 @@ const taskLabels: Record<TaskStatus, string> = {
   succeeded: '已完成',
   failed: '失败',
   canceled: '已取消',
+}
+
+function profileCheckTone(status: ProfileCheckStatus): 'emerald' | 'slate' | 'amber' | 'rose' {
+  switch (status) {
+    case 'ok':
+      return 'emerald'
+    case 'warning':
+      return 'amber'
+    case 'error':
+      return 'rose'
+    default:
+      return 'slate'
+  }
+}
+
+const profileCheckLabels: Record<ProfileCheckStatus, string> = {
+  ok: '通过',
+  info: '信息',
+  warning: '提醒',
+  error: '错误',
 }
 
 const resourceLabels: Record<string, string> = {
@@ -127,7 +154,7 @@ export function Workspaces() {
             {workspaces.isFetching ? <Spinner /> : <span className="text-xs">↻</span>}
             刷新
           </Button>
-          <Button onClick={() => setCreateOpen(true)}>
+          <Button data-testid="workspace-create" onClick={() => setCreateOpen(true)}>
             <span className="text-base leading-none">+</span>
             新建 Workspace
           </Button>
@@ -285,6 +312,7 @@ export function Workspaces() {
                           <Button
                             variant="ghost"
                             size="sm"
+                            data-testid="workspace-delete"
                             className="text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
                             onClick={() => setDeleteTarget(workspace)}
                           >
@@ -346,9 +374,18 @@ function CreateWorkspaceModal({
   onClose: () => void
   onCreated: (workspace: Workspace) => void
 }) {
+  const profiles = useProfiles()
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [projectType, setProjectType] = useState('discourse')
+  const [profileId, setProfileId] = useState('')
+  const [repositoryURL, setRepositoryURL] = useState('')
+  const [branch, setBranch] = useState('')
+  const [acceptProfile, setAcceptProfile] = useState(false)
+  const initializedProfile = useRef('')
+
+  const selectedProfile =
+    profiles.data?.items.find((item) => item.id === profileId) ?? null
+  const profileCheck = useProfileCheck(selectedProfile?.id ?? null, open)
 
   const mutation = useMutation({
     mutationFn: api.createWorkspace,
@@ -363,33 +400,103 @@ function CreateWorkspaceModal({
   useEffect(() => {
     if (open && !wasOpen.current) {
       mutation.reset()
+      setProfileId('')
+      setRepositoryURL('')
+      setBranch('')
+      setAcceptProfile(false)
+      initializedProfile.current = ''
     }
     wasOpen.current = open
   }, [open])
 
+  useEffect(() => {
+    if (!open) return
+    const items = profiles.data?.items
+    if (!items?.length) return
+    if (!items.some((item) => item.id === profileId)) {
+      setProfileId(items[0].id)
+    }
+  }, [open, profiles.data, profileId])
+
+  useEffect(() => {
+    if (!open || !selectedProfile) return
+    if (initializedProfile.current === selectedProfile.id) return
+    initializedProfile.current = selectedProfile.id
+    setRepositoryURL(selectedProfile.default_repository_url ?? '')
+    setBranch(selectedProfile.default_branch ?? '')
+  }, [open, selectedProfile])
+
+  useEffect(() => {
+    setAcceptProfile(false)
+  }, [profileId])
+
+  const selectProfile = (id: string) => {
+    setProfileId(id)
+    setAcceptProfile(false)
+    const next = profiles.data?.items.find((item) => item.id === id)
+    if (next) {
+      initializedProfile.current = next.id
+      setRepositoryURL(next.default_repository_url ?? '')
+      setBranch(next.default_branch ?? '')
+    }
+  }
+
+  const requiresProfileAck = Boolean(
+    selectedProfile &&
+      selectedProfile.origin.type !== 'builtin' &&
+      !selectedProfile.origin.verified,
+  )
+
   const nameError = name.length > 0 ? validateName(name) : ''
   const descriptionError =
     description.trim().length > 500 ? '描述不能超过 500 个字符' : ''
+  const sourceError =
+    selectedProfile?.source_required && !repositoryURL.trim()
+      ? '该模板需要源码仓库地址'
+      : ''
+  const branchError = branch.trim().length > 255 ? '分支名称不能超过 255 个字符' : ''
+  const profileError =
+    !profiles.isLoading && !selectedProfile ? '请选择 Project Profile' : ''
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const error = validateName(name)
-    if (error || descriptionError) {
+    if (
+      error ||
+      descriptionError ||
+      sourceError ||
+      branchError ||
+      !selectedProfile ||
+      (requiresProfileAck && !acceptProfile)
+    ) {
       return
     }
     mutation.mutate({
       name: name.trim(),
       description: description.trim(),
-      project_type: projectType.trim() || undefined,
+      profile_id: selectedProfile.id,
+      repository_url: repositoryURL.trim() || undefined,
+      branch: branch.trim() || undefined,
+      accept_profile: requiresProfileAck ? acceptProfile : undefined,
     })
   }
+
+  const checkReport = profileCheck.data
+  const checkTone = !checkReport
+    ? 'slate'
+    : checkReport.error_count > 0
+      ? 'rose'
+      : checkReport.warning_count > 0
+        ? 'amber'
+        : 'emerald'
 
   return (
     <Modal
       open={open}
       onClose={onClose}
+      width="max-w-3xl"
       title="新建 Workspace"
-      description="创建后将自动分配空闲端口、独立数据库名与 Redis DB；PostgreSQL 运行时会自动创建数据库。"
+      description="选择 Project Profile 应用默认项目类型与源码；创建后自动分配空闲端口、独立数据库名与 Redis DB。"
       footer={
         <>
           <Button variant="ghost" onClick={onClose} disabled={mutation.isPending}>
@@ -398,7 +505,14 @@ function CreateWorkspaceModal({
           <Button
             type="submit"
             form="create-workspace-form"
-            disabled={mutation.isPending || Boolean(validateName(name)) || Boolean(descriptionError)}
+            data-testid="workspace-create-submit"
+            disabled={
+              mutation.isPending ||
+              !selectedProfile ||
+              Boolean(validateName(name)) ||
+              Boolean(descriptionError || sourceError || branchError) ||
+              (requiresProfileAck && !acceptProfile)
+            }
           >
             {mutation.isPending ? <Spinner /> : null}
             创建
@@ -407,6 +521,175 @@ function CreateWorkspaceModal({
       }
     >
       <form id="create-workspace-form" onSubmit={submit} className="space-y-4">
+        <Field
+          label="Project Profile"
+          htmlFor="workspace-profile"
+          error={profiles.error ? undefined : profileError || undefined}
+          hint="模板决定项目类型、默认源码与依赖预检，不会自动克隆或执行远程代码。"
+        >
+          <select
+            id="workspace-profile"
+            className={inputClass}
+            value={profileId}
+            onChange={(event) => selectProfile(event.target.value)}
+            disabled={profiles.isLoading || mutation.isPending}
+          >
+            {profileId === '' ? <option value="">选择 Profile…</option> : null}
+            {profiles.data?.items.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        {profiles.error ? (
+          <ErrorNotice error={profiles.error} onRetry={() => void profiles.refetch()} />
+        ) : null}
+
+        {selectedProfile ? (
+          <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone={selectedProfile.origin.verified ? 'emerald' : 'amber'}>
+                {selectedProfile.origin.verified ? '已验证模板' : '未验证模板'}
+              </Badge>
+              <span className="text-xs font-medium text-slate-200">
+                {selectedProfile.origin.name || '未知来源'}
+              </span>
+              {selectedProfile.origin.version ? (
+                <span className="text-[11px] text-slate-500">
+                  {selectedProfile.origin.version}
+                </span>
+              ) : null}
+              <Badge tone="slate">{selectedProfile.project_type}</Badge>
+              {selectedProfile.extension_kind ? (
+                <Badge tone="cyan">{selectedProfile.extension_kind}</Badge>
+              ) : null}
+            </div>
+            {selectedProfile.origin.url ? (
+              <p className="break-all text-[11px] leading-4 text-slate-500">
+                来源地址：<span className="font-mono">{selectedProfile.origin.url}</span>
+              </p>
+            ) : null}
+            <p className="text-xs leading-5 text-slate-400">{selectedProfile.description}</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <p className="text-[11px] uppercase tracking-wide text-slate-500">创建操作</p>
+                <ul className="mt-1 space-y-1">
+                  {selectedProfile.operations.map((operation) => (
+                    <li key={operation.id} className="text-xs leading-5 text-slate-300">
+                      · {operation.title}
+                      {operation.destructive ? (
+                        <span className="ml-1 text-rose-300">[破坏性]</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <p className="text-[11px] uppercase tracking-wide text-slate-500">所需权限</p>
+                <ul className="mt-1 space-y-1">
+                  {selectedProfile.permissions.map((permission) => (
+                    <li key={permission.id} className="text-xs leading-5 text-slate-300">
+                      · {permission.title}
+                      <span className="ml-1 text-[10px] text-slate-500">
+                        [{permission.risk}]
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            {requiresProfileAck ? (
+              <label
+                className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 ${
+                  acceptProfile
+                    ? 'border-emerald-400/30 bg-emerald-400/5'
+                    : 'border-amber-400/30 bg-amber-400/5'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 accent-amber-400"
+                  checked={acceptProfile}
+                  onChange={(event) => setAcceptProfile(event.target.checked)}
+                />
+                <span>
+                  <span className="block text-xs font-medium text-amber-200">
+                    第三方模板需要确认
+                  </span>
+                  <span className="mt-1 block text-[11px] leading-5 text-slate-400">
+                    我已知晓来源「{selectedProfile.origin.name || '未知来源'}」、上述创建操作与所需权限，并同意用它创建 Workspace。DevKit 只执行固定的 Workspace 创建流程，不会运行模板仓库中的代码。
+                  </span>
+                </span>
+              </label>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-slate-300">依赖预检</span>
+              {profileCheck.isFetching ? <Spinner className="h-3 w-3" /> : null}
+              {checkReport ? (
+                <>
+                  <Badge tone={checkTone}>
+                    {checkReport.ready ? '可创建' : '存在错误'}
+                  </Badge>
+                  <span className="text-[11px] text-slate-500">
+                    {checkReport.error_count} 错误 · {checkReport.warning_count} 提醒
+                  </span>
+                </>
+              ) : null}
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void profileCheck.refetch()}
+              disabled={!selectedProfile || profileCheck.isFetching}
+            >
+              重新检查
+            </Button>
+          </div>
+          {profileCheck.error ? (
+            <div className="mt-2">
+              <ErrorNotice error={profileCheck.error} />
+            </div>
+          ) : checkReport ? (
+            <div className="mt-2 space-y-1.5">
+              {checkReport.checks.map((check) => (
+                <div key={check.id} className="flex items-start gap-2 text-xs">
+                  <Badge
+                    tone={profileCheckTone(check.status)}
+                    className="shrink-0"
+                  >
+                    {profileCheckLabels[check.status]}
+                  </Badge>
+                  <div className="min-w-0">
+                    <span className="text-slate-300">{check.title}</span>
+                    <span className="text-slate-500"> · {check.message}</span>
+                    {check.fix_action && check.status !== 'ok' && check.status !== 'info' ? (
+                      <p className="text-[11px] leading-4 text-slate-500">
+                        → {check.fix_action}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+              {!checkReport.ready ? (
+                <p className="text-[11px] leading-4 text-rose-300/90">
+                  Runtime 错误通常会导致项目初始化失败；仍可先创建 Workspace，修复环境后再继续。
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-slate-500">
+              {selectedProfile ? '正在检查 Runtime、服务与源码配置…' : '选择 Profile 后开始检查。'}
+            </p>
+          )}
+        </div>
+
         <Field
           label="名称"
           htmlFor="workspace-name"
@@ -436,16 +719,34 @@ function CreateWorkspaceModal({
         </Field>
 
         <Field
-          label="项目类型"
-          htmlFor="workspace-project-type"
-          hint="当前仅记录类型；Git 与 Discourse 初始化将在 M3 提供。"
+          label="源码仓库"
+          htmlFor="workspace-repository"
+          hint="仅记录地址，不会在创建时克隆。凭据请使用 SSH Agent 或 Git 凭据助手。"
+          error={sourceError || undefined}
         >
           <input
-            id="workspace-project-type"
+            id="workspace-repository"
             className={inputClass}
-            value={projectType}
-            onChange={(event) => setProjectType(event.target.value)}
-            placeholder="discourse"
+            value={repositoryURL}
+            onChange={(event) => setRepositoryURL(event.target.value)}
+            placeholder="https://github.com/discourse/discourse.git"
+            maxLength={2048}
+          />
+        </Field>
+
+        <Field
+          label="分支"
+          htmlFor="workspace-branch"
+          hint="留空时使用模板或 DevKit 的默认分支。"
+          error={branchError || undefined}
+        >
+          <input
+            id="workspace-branch"
+            className={inputClass}
+            value={branch}
+            onChange={(event) => setBranch(event.target.value)}
+            placeholder="main"
+            maxLength={255}
           />
         </Field>
 
@@ -497,6 +798,9 @@ function InspectWorkspaceModal({
           <div className="flex flex-wrap items-center gap-3">
             <StateBadge state={workspace.state} />
             <Badge tone="slate">{workspace.project_type}</Badge>
+            {workspace.profile_id ? (
+              <Badge tone="sky">Profile {workspace.profile_id}</Badge>
+            ) : null}
             <Badge tone="slate">Runtime {workspace.runtime_profile}</Badge>
           </div>
           <p className="text-sm leading-6 text-slate-400">
@@ -679,6 +983,7 @@ function DeleteWorkspaceModal({
             </Button>
             <Button
               variant="danger"
+              data-testid="workspace-delete-submit"
               onClick={() => plan && mutation.mutate(plan)}
               disabled={!canConfirm}
             >
@@ -820,6 +1125,7 @@ function DeleteWorkspaceModal({
                 <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3">
                   <input
                     type="checkbox"
+                    data-testid="workspace-delete-confirm"
                     className="mt-0.5 h-4 w-4 accent-rose-500"
                     checked={confirmed}
                     onChange={(event) => setConfirmed(event.target.checked)}

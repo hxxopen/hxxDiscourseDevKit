@@ -353,6 +353,24 @@ func (m *Manager) createLocked(ctx context.Context, req CreateRequest) (*Workspa
 	if projectType == "" {
 		projectType = "discourse"
 	}
+	profileID := strings.TrimSpace(req.ProfileID)
+	if len(profileID) > 64 || strings.ContainsAny(profileID, " \t\r\n\x00") {
+		return nil, fmt.Errorf("%w: profile_id 无效", ErrValidation)
+	}
+	repositoryURL := strings.TrimSpace(req.RepositoryURL)
+	if repositoryURL == "" {
+		repositoryURL = m.cfg.Get().Project.DefaultRepositoryURL
+	}
+	if len(repositoryURL) > 2048 || strings.ContainsAny(repositoryURL, "\x00\r\n") {
+		return nil, fmt.Errorf("%w: 仓库地址无效", ErrValidation)
+	}
+	branch := strings.TrimSpace(req.Branch)
+	if branch == "" {
+		branch = m.cfg.Get().Project.DefaultBranch
+	}
+	if len(branch) > 255 || strings.ContainsAny(branch, "\x00\r\n") {
+		return nil, fmt.Errorf("%w: 分支名称无效", ErrValidation)
+	}
 
 	existing, err := m.listLocked()
 	if err != nil {
@@ -397,13 +415,14 @@ func (m *Manager) createLocked(ctx context.Context, req CreateRequest) (*Workspa
 		Name:                   name,
 		Description:            description,
 		ProjectType:            projectType,
+		ProfileID:              profileID,
 		State:                  StateEmpty,
 		CreatedAt:              now,
 		UpdatedAt:              now,
 		Source: SourceConfig{
 			Path:          "source",
-			RepositoryURL: m.cfg.Get().Project.DefaultRepositoryURL,
-			Branch:        m.cfg.Get().Project.DefaultBranch,
+			RepositoryURL: repositoryURL,
+			Branch:        branch,
 		},
 		RuntimeProfile: m.cfg.Get().Runtime.DefaultProfile,
 		Database: DatabaseConfig{

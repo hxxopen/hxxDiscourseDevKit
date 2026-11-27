@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hxx/hxxDiscourseDevKit/internal/httpx"
+	"github.com/hxx/hxxDiscourseDevKit/internal/project"
 	"github.com/hxx/hxxDiscourseDevKit/internal/workspace"
 )
 
@@ -37,6 +38,10 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err, s.log)
 		return
 	}
+	if err := s.prepareCreateRequest(&req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	created, err := s.opts.Workspaces.Create(r.Context(), req)
 	if err != nil {
 		s.fail(w, r, err)
@@ -44,6 +49,41 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Location", "/api/v1/workspaces/"+created.WorkspaceID)
 	httpx.WriteJSON(w, http.StatusCreated, created)
+}
+
+// prepareCreateRequest resolves a profile into workspace defaults and
+// validates user-provided source overrides before any state is created.
+func (s *Server) prepareCreateRequest(req *workspace.CreateRequest) error {
+	if profileID := strings.TrimSpace(req.ProfileID); profileID != "" {
+		if s.opts.Profiles == nil {
+			return errFeatureUnavailable("Project Profile")
+		}
+		def, err := s.opts.Profiles.Get(profileID)
+		if err != nil {
+			return err
+		}
+		if !def.Origin.Verified && def.Origin.Type != "builtin" && !req.AcceptProfile {
+			return httpx.BadRequest("PROFILE_ACK_REQUIRED",
+				fmt.Sprintf("第三方模板「%s」尚未验证；请先查看其来源、%d 项创建操作与 %d 项所需权限，确认后重试",
+					def.Name, len(def.Operations), len(def.Permissions)))
+		}
+		req.ProfileID = def.ID
+		req.ProjectType = def.ProjectType
+		if strings.TrimSpace(req.RepositoryURL) == "" {
+			req.RepositoryURL = def.DefaultRepositoryURL
+		}
+		if strings.TrimSpace(req.Branch) == "" {
+			req.Branch = def.DefaultBranch
+		}
+		if def.SourceRequired && strings.TrimSpace(req.RepositoryURL) == "" {
+			return httpx.BadRequest("PROFILE_SOURCE_REQUIRED",
+				fmt.Sprintf("模板「%s」需要源码仓库地址", def.Name))
+		}
+	}
+	if err := project.ValidateRepositoryURL(req.RepositoryURL); err != nil {
+		return err
+	}
+	return project.ValidateBranch(req.Branch)
 }
 
 func (s *Server) handleGetWorkspace(w http.ResponseWriter, r *http.Request) {

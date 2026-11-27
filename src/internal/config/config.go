@@ -24,6 +24,7 @@ type Config struct {
 	UpdatedAt             time.Time       `json:"updated_at"`
 	Network               NetworkConfig   `json:"network"`
 	Runtime               RuntimeConfig   `json:"runtime"`
+	Storage               StorageConfig   `json:"storage"`
 	Project               ProjectSettings `json:"project"`
 	Services              ServicesConfig  `json:"services"`
 	Logging               LoggingConfig   `json:"logging"`
@@ -44,6 +45,13 @@ type RuntimeConfig struct {
 	// service commands on Windows. When empty, the first installed distribution
 	// is used as a fallback.
 	WSLDistro string `json:"wsl_distro,omitempty"`
+}
+
+// StorageConfig controls where project and service data are stored. When
+// DataRoot is empty, data lives under the instance root. On Windows a new
+// instance defaults DataRoot to the WSL2 filesystem.
+type StorageConfig struct {
+	DataRoot string `json:"data_root,omitempty"`
 }
 
 // ProjectSettings controls source checkout and development process defaults.
@@ -198,6 +206,43 @@ func (c *Config) ApplyDefaults(paths *Paths) {
 	if c.Services.Redis.Mode == "" {
 		c.Services.Redis = def.Services.Redis
 	}
+	// Managed services rely on the default endpoint, storage and secret refs.
+	// A hand-edited config that only sets mode must still resolve the password
+	// the manager generated and a usable data directory, otherwise status and
+	// start fail with confusing errors.
+	if c.Services.PostgreSQL.Mode == "managed" {
+		pg, defPG := &c.Services.PostgreSQL, def.Services.PostgreSQL
+		if pg.Host == "" {
+			pg.Host = defPG.Host
+		}
+		if pg.Port == 0 {
+			pg.Port = defPG.Port
+		}
+		if pg.AdminUser == "" {
+			pg.AdminUser = defPG.AdminUser
+		}
+		if pg.AdminPasswordRef == "" {
+			pg.AdminPasswordRef = defPG.AdminPasswordRef
+		}
+		if pg.DataDir == "" {
+			pg.DataDir = defPG.DataDir
+		}
+	}
+	if c.Services.Redis.Mode == "managed" {
+		redis, defRedis := &c.Services.Redis, def.Services.Redis
+		if redis.Host == "" {
+			redis.Host = defRedis.Host
+		}
+		if redis.Port == 0 {
+			redis.Port = defRedis.Port
+		}
+		if redis.PasswordRef == "" {
+			redis.PasswordRef = defRedis.PasswordRef
+		}
+		if redis.DataDir == "" {
+			redis.DataDir = defRedis.DataDir
+		}
+	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = def.Logging.Level
 	}
@@ -235,6 +280,13 @@ func (c *Config) Validate() error {
 	}
 	if strings.ContainsAny(c.Runtime.WSLDistro, "\x00\r\n") {
 		return fmt.Errorf("runtime.wsl_distro must not contain control characters")
+	}
+	dataRoot := strings.TrimSpace(c.Storage.DataRoot)
+	if strings.ContainsAny(dataRoot, "\x00\r\n") {
+		return fmt.Errorf("storage.data_root must not contain control characters")
+	}
+	if dataRoot != "" && !isAbsoluteDataRoot(dataRoot) {
+		return fmt.Errorf("storage.data_root must be an absolute path")
 	}
 	if strings.TrimSpace(c.Project.DefaultRepositoryURL) == "" {
 		return fmt.Errorf("project.default_repository_url must not be empty")
@@ -293,6 +345,13 @@ func validateService(name, mode, host string, port int, external ExternalEndpoin
 		return fmt.Errorf("services.%s.mode must be managed or external", name)
 	}
 	return nil
+}
+
+func isAbsoluteDataRoot(value string) bool {
+	if strings.HasPrefix(value, `\\`) {
+		return true
+	}
+	return filepath.IsAbs(value)
 }
 
 func isLoopbackHost(host string) bool {

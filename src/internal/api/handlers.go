@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	goruntime "runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
@@ -41,10 +43,21 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type storageInfo struct {
+	DataRoot        string `json:"data_root"`
+	Configured      bool   `json:"configured"`
+	Split           bool   `json:"split"`
+	Legacy          bool   `json:"legacy"`
+	DataRootPending bool   `json:"data_root_pending"`
+	Migrating       bool   `json:"migrating"`
+	MigrationTaskID string `json:"migration_task_id,omitempty"`
+}
+
 type infoResponse struct {
 	Version           version.Info    `json:"version"`
 	InstanceID        string          `json:"instance_id"`
 	Root              string          `json:"root"`
+	Storage           storageInfo     `json:"storage"`
 	APIAddr           string          `json:"api_addr"`
 	StartedAt         time.Time       `json:"started_at"`
 	Platform          platform.Info   `json:"platform"`
@@ -64,24 +77,41 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if apiAddr == "" {
 		apiAddr = fmt.Sprintf("%s:%d", cfg.Network.Host, s.opts.APIPort)
 	}
+	storage := storageInfo{
+		DataRoot:        s.opts.Paths.DataRoot,
+		Configured:      strings.TrimSpace(cfg.Storage.DataRoot) != "",
+		Split:           s.opts.Paths.UsesSplitDataRoot(),
+		Legacy:          s.opts.Paths.LegacyDataRoot,
+		DataRootPending: s.opts.Paths.DataRootPending(cfg.Storage.DataRoot),
+	}
+	if s.opts.StorageMigration != nil {
+		storage.Migrating = s.opts.StorageMigration.Migrating()
+		storage.MigrationTaskID = s.opts.StorageMigration.CurrentTaskID()
+	}
 	httpx.WriteJSON(w, http.StatusOK, infoResponse{
 		Version:           version.Get(),
 		InstanceID:        cfg.InstanceID,
 		Root:              s.opts.Paths.Root,
+		Storage:           storage,
 		APIAddr:           apiAddr,
 		StartedAt:         s.startedAt,
 		Platform:          platform.Detect(),
 		ActiveWorkspaceID: cfg.ActiveWorkspaceID,
 		WorkspaceCount:    len(list),
 		Capabilities: map[string]bool{
-			"workspaces": true,
-			"tasks":      true,
-			"runtime":    s.opts.Runtime != nil,
-			"services":   s.opts.Services != nil,
-			"project":    s.opts.Project != nil,
-			"backups":    s.opts.Backups != nil,
-			"plugins":    s.opts.Extensions != nil,
-			"themes":     s.opts.Extensions != nil,
+			"workspaces":        true,
+			"tasks":             true,
+			"runtime":           s.opts.Runtime != nil,
+			"runtime_install":   s.opts.Runtime != nil && goruntime.GOOS == "windows",
+			"services":          s.opts.Services != nil,
+			"project":           s.opts.Project != nil,
+			"backups":           s.opts.Backups != nil,
+			"audit":             s.opts.Audit != nil,
+			"plugins":           s.opts.Extensions != nil,
+			"themes":            s.opts.Extensions != nil,
+			"theme_preview":     s.opts.ThemePreview != nil,
+			"profiles":          s.opts.Profiles != nil,
+			"storage_migration": s.opts.StorageMigration != nil,
 		},
 	})
 }

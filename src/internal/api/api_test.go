@@ -15,27 +15,36 @@ import (
 	"time"
 
 	"github.com/hxx/hxxDiscourseDevKit/internal/api"
+	"github.com/hxx/hxxDiscourseDevKit/internal/audit"
 	"github.com/hxx/hxxDiscourseDevKit/internal/config"
 	"github.com/hxx/hxxDiscourseDevKit/internal/diagnostics"
 	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
+	"github.com/hxx/hxxDiscourseDevKit/internal/profile"
 	"github.com/hxx/hxxDiscourseDevKit/internal/secret"
 	"github.com/hxx/hxxDiscourseDevKit/internal/task"
+	"github.com/hxx/hxxDiscourseDevKit/internal/themepreview"
 	"github.com/hxx/hxxDiscourseDevKit/internal/workspace"
 )
 
 const allowedOrigin = "http://127.0.0.1:17860"
 
 type stack struct {
-	t          *testing.T
-	server     *httptest.Server
-	workspaces *workspace.Manager
-	secrets    *secret.Store
-	token      string
-	root       string
-	logLevel   *string
+	t           *testing.T
+	server      *httptest.Server
+	workspaces  *workspace.Manager
+	secrets     *secret.Store
+	token       string
+	root        string
+	paths       *config.Paths
+	cfg         *config.Store
+	logLevel    *string
+	pluginTests *fakePluginTestRunner
+	profiles    *profile.Catalog
+	audit       *audit.Logger
+	auditDir    string
 }
 
-func newStack(t *testing.T) *stack {
+func newStack(t *testing.T, mutate ...func(*api.Options)) *stack {
 	t.Helper()
 	root := t.TempDir()
 	paths := config.NewPaths(root)
@@ -51,6 +60,10 @@ func newStack(t *testing.T) *stack {
 		t.Fatalf("secret.Open: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditLogger, err := audit.New(paths.AuditDir, 30)
+	if err != nil {
+		t.Fatalf("audit.New: %v", err)
+	}
 	tasks := task.New(filepath.Join(paths.LogsDir, "tasks.jsonl"), logger)
 	t.Cleanup(tasks.Close)
 	workspaces := workspace.New(paths, cfg, secrets, logger, workspace.Options{
@@ -59,36 +72,56 @@ func newStack(t *testing.T) *stack {
 	})
 	diag := diagnostics.New(paths, cfg, workspaces, logger)
 	extensions := extension.New(paths, workspaces, logger)
+	themePreview := themepreview.New(paths, workspaces, extensions, logger)
+	profiles := profile.New(nil, nil)
+	if err := profiles.EnableSources(paths.ProfileSourcesFile(), paths.ProfileSourcesDir, nil); err != nil {
+		t.Fatalf("EnableSources: %v", err)
+	}
+	pluginTests := &fakePluginTestRunner{}
 
 	ui := fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>DevKit Test UI</title>")},
 	}
 	level := ""
-	server := api.New(api.Options{
-		Paths:       paths,
-		Config:      cfg,
-		Secrets:     secrets,
-		Workspaces:  workspaces,
-		Extensions:  extensions,
-		Tasks:       tasks,
-		Diagnostics: diag,
-		UI:          ui,
-		Logger:      logger,
-		APIPort:     17860,
-		StartedAt:   time.Now(),
-		SetLogLevel: func(next string) { level = next },
-	})
+	serverOpts := api.Options{
+		Paths:        paths,
+		Config:       cfg,
+		Secrets:      secrets,
+		Workspaces:   workspaces,
+		Audit:        auditLogger,
+		Extensions:   extensions,
+		ThemePreview: themePreview,
+		PluginTests:  pluginTests,
+		Profiles:     profiles,
+		Tasks:        tasks,
+		Diagnostics:  diag,
+		UI:           ui,
+		Logger:       logger,
+		APIPort:      17860,
+		StartedAt:    time.Now(),
+		SetLogLevel:  func(next string) { level = next },
+	}
+	for _, apply := range mutate {
+		apply(&serverOpts)
+	}
+	server := api.New(serverOpts)
 	httpServer := httptest.NewServer(server.Handler())
 	t.Cleanup(httpServer.Close)
 
 	return &stack{
-		t:          t,
-		server:     httpServer,
-		workspaces: workspaces,
-		secrets:    secrets,
-		token:      secrets.APIToken(),
-		root:       root,
-		logLevel:   &level,
+		t:           t,
+		server:      httpServer,
+		workspaces:  workspaces,
+		secrets:     secrets,
+		token:       secrets.APIToken(),
+		root:        root,
+		paths:       paths,
+		cfg:         cfg,
+		logLevel:    &level,
+		pluginTests: pluginTests,
+		profiles:    profiles,
+		audit:       auditLogger,
+		auditDir:    paths.AuditDir,
 	}
 }
 

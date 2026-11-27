@@ -199,6 +199,18 @@ func (m *Manager) List(limit int) []Task {
 	return out
 }
 
+// Active reports whether any task is queued or running.
+func (m *Manager) Active() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.tasks {
+		if t != nil && !t.Status.Terminal() {
+			return true
+		}
+	}
+	return false
+}
+
 // Cancel requests cancellation of a running task.
 func (m *Manager) Cancel(taskID string) error {
 	m.mu.Lock()

@@ -3,6 +3,7 @@ package workspace
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -38,6 +39,7 @@ type Workspace struct {
 	Name                   string         `json:"name"`
 	Description            string         `json:"description"`
 	ProjectType            string         `json:"project_type"`
+	ProfileID              string         `json:"profile_id,omitempty"`
 	State                  State          `json:"state"`
 	LastError              string         `json:"last_error"`
 	CreatedAt              time.Time      `json:"created_at"`
@@ -76,6 +78,22 @@ type DatabaseConfig struct {
 	ProvisionError string     `json:"provision_error,omitempty"`
 }
 
+// TestDatabaseName returns the isolated database used by RAILS_ENV=test.
+// PostgreSQL identifiers are limited to 63 bytes, so a long development name
+// is truncated before the suffix is appended.
+func (ws *Workspace) TestDatabaseName() string {
+	const suffix = "_test"
+	const maxIdentifier = 63
+	base := strings.TrimSpace(ws.Database.DatabaseName)
+	if base == "" {
+		return ""
+	}
+	if len(base)+len(suffix) > maxIdentifier {
+		base = strings.TrimRight(base[:maxIdentifier-len(suffix)], "_")
+	}
+	return base + suffix
+}
+
 // RedisConfig describes the workspace's Redis namespace.
 type RedisConfig struct {
 	Mode      string `json:"mode"`
@@ -98,11 +116,18 @@ type ProjectConfig struct {
 	LastStartedAt *time.Time `json:"last_started_at"`
 }
 
-// CreateRequest creates a workspace.
+// CreateRequest creates a workspace. ProfileID and the source overrides are
+// resolved by the API before the manager persists the workspace.
 type CreateRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	ProjectType string `json:"project_type"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	ProjectType   string `json:"project_type"`
+	ProfileID     string `json:"profile_id,omitempty"`
+	RepositoryURL string `json:"repository_url,omitempty"`
+	Branch        string `json:"branch,omitempty"`
+	// AcceptProfile records explicit consent to an unverified third-party
+	// template after its origin, operations and permissions were displayed.
+	AcceptProfile bool `json:"accept_profile,omitempty"`
 }
 
 // UpdateRequest changes mutable workspace metadata.

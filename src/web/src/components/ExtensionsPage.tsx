@@ -1,8 +1,14 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState, type FormEvent } from 'react'
 import { api } from '../api/client'
-import { useExtensions, useWorkspaces } from '../api/hooks'
-import type { ExtensionCreateInput, ExtensionKind } from '../api/types'
+import { isTerminalTask, useExtensions, useLog, useTask, useWorkspaces } from '../api/hooks'
+import type {
+  ExtensionCheckReport,
+  ExtensionCreateInput,
+  ExtensionItem,
+  ExtensionKind,
+  ExtensionPackage,
+} from '../api/types'
 import {
   Badge,
   Button,
@@ -12,11 +18,15 @@ import {
   ErrorNotice,
   Field,
   Modal,
+  ProgressBar,
   Skeleton,
   Spinner,
   inputClass,
 } from '../components/ui'
-import { errorMessage, formatDate } from '../lib/format'
+import { ExtensionCheckView } from './ExtensionCheckView'
+import { ThemeWorkbench } from './ThemeWorkbench'
+import { errorMessage, formatBytes, formatDate } from '../lib/format'
+import { taskLabels, taskTone } from '../lib/tasks'
 
 type Notice = { tone: 'success' | 'error'; text: string }
 
@@ -60,7 +70,7 @@ const copy: Record<
     eyebrow: 'Themes',
     title: '主题',
     description:
-      '为 Workspace 创建主题脚手架，配合 discourse_theme 预览与构建；文件位于 data/themes/。',
+      '为 Workspace 创建主题脚手架，检查依赖、构建分发包，并导入运行中的本地 Discourse 预览。文件位于 data/themes/。',
     create: '新建主题',
     directory: '主题目录',
     singular: '主题',
@@ -72,6 +82,14 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
   const workspaces = useWorkspaces()
   const [selectedId, setSelectedId] = useState('')
   const [notice, setNotice] = useState<Notice | null>(null)
+  const [packageResult, setPackageResult] = useState<ExtensionPackage | null>(null)
+  const [toggleTarget, setToggleTarget] = useState<ExtensionItem | null>(null)
+  const [checkTarget, setCheckTarget] = useState<ExtensionItem | null>(null)
+  const [checkReport, setCheckReport] = useState<ExtensionCheckReport | null>(null)
+  const [testTarget, setTestTarget] = useState<ExtensionItem | null>(null)
+  const [testTaskId, setTestTaskId] = useState<string | null>(null)
+  const [themeTarget, setThemeTarget] = useState<ExtensionItem | null>(null)
+  const [themeMode, setThemeMode] = useState<'build' | 'preview'>('build')
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState<FormState>(emptyForm)
   const [formError, setFormError] = useState('')
@@ -84,11 +102,25 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
   const sourceReady = listing.data?.source_installed ?? false
   const canCreate = Boolean(currentId) && (kind === 'theme' || sourceReady)
 
+  const testTask = useTask(testTaskId)
+  const testRun = testTask.data
+  const testRunning = Boolean(testRun && !isTerminalTask(testRun.status))
+  const testLogSource = testTarget && testTaskId ? `workspace:${currentId}:test` : null
+  const testLog = useLog(testLogSource, 120, testRunning)
+
   useEffect(() => {
     if (!selectedId && activeId) {
       setSelectedId(activeId)
     }
   }, [activeId, selectedId])
+
+  useEffect(() => {
+    if (testTarget && testRun && isTerminalTask(testRun.status)) {
+      void queryClient.invalidateQueries({
+        queryKey: ['log', `workspace:${currentId}:test`, 120],
+      })
+    }
+  }, [currentId, queryClient, testRun, testTarget])
 
   const create = useMutation({
     mutationFn: (input: ExtensionCreateInput) => api.createExtension(kind, currentId, input),
@@ -102,6 +134,94 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
     },
     onError: (error) => setFormError(errorMessage(error)),
   })
+
+  const packageZip = useMutation({
+    mutationFn: (slug: string) => api.packageExtension(kind, currentId, slug),
+    onSuccess: (created) => {
+      setPackageResult(created)
+      setNotice({
+        tone: 'success',
+        text: `已生成 ${created.file_name}（${created.file_count} 个文件，${formatBytes(created.size_bytes)}）`,
+      })
+    },
+    onError: (error) => {
+      setPackageResult(null)
+      setNotice({ tone: 'error', text: errorMessage(error) })
+    },
+  })
+
+  const togglePlugin = useMutation({
+    mutationFn: (target: ExtensionItem) =>
+      api.setPluginEnabled(currentId, target.slug, !target.enabled),
+    onSuccess: (updated) => {
+      setToggleTarget(null)
+      setNotice({
+        tone: 'success',
+        text: `已${updated.enabled ? '启用' : '禁用'}插件 ${updated.name}；重启 Rails 开发服务器后生效。`,
+      })
+      void queryClient.invalidateQueries({ queryKey: ['extensions', kind, currentId] })
+    },
+    onError: (error) => {
+      setToggleTarget(null)
+      setNotice({ tone: 'error', text: errorMessage(error) })
+    },
+  })
+
+  const check = useMutation({
+    mutationFn: (target: ExtensionItem) => api.checkExtension(kind, currentId, target.slug),
+    onSuccess: (report) => setCheckReport(report),
+    onError: (error) => {
+      setCheckTarget(null)
+      setCheckReport(null)
+      setNotice({ tone: 'error', text: errorMessage(error) })
+    },
+  })
+
+  const test = useMutation({
+    mutationFn: (target: ExtensionItem) => api.testPlugin(currentId, target.slug),
+    onSuccess: (accepted) => setTestTaskId(accepted.task_id),
+    onError: (error) => {
+      setTestTarget(null)
+      setTestTaskId(null)
+      setNotice({ tone: 'error', text: errorMessage(error) })
+    },
+  })
+
+  const openTest = (item: ExtensionItem) => {
+    setTestTarget(item)
+    setTestTaskId(null)
+    test.reset()
+    test.mutate(item)
+  }
+
+  const closeTest = () => {
+    if (test.isPending || testRunning) {
+      return
+    }
+    setTestTarget(null)
+    setTestTaskId(null)
+    test.reset()
+  }
+
+  const openTheme = (item: ExtensionItem, mode: 'build' | 'preview') => {
+    setThemeTarget(item)
+    setThemeMode(mode)
+  }
+
+  const openCheck = (item: ExtensionItem) => {
+    setCheckTarget(item)
+    setCheckReport(null)
+    check.mutate(item)
+  }
+
+  const closeCheck = () => {
+    if (check.isPending) {
+      return
+    }
+    setCheckTarget(null)
+    setCheckReport(null)
+    check.reset()
+  }
 
   const openModal = () => {
     setForm(emptyForm)
@@ -154,6 +274,13 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
             onChange={(event) => {
               setSelectedId(event.target.value)
               setNotice(null)
+              setPackageResult(null)
+              setToggleTarget(null)
+              setCheckTarget(null)
+              setCheckReport(null)
+              setTestTarget(null)
+              setTestTaskId(null)
+              setThemeTarget(null)
             }}
           >
             {list.length === 0 ? <option value="">（没有 Workspace）</option> : null}
@@ -200,6 +327,27 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
             ✕
           </button>
         </div>
+      ) : null}
+
+      {packageResult ? (
+        <Card>
+          <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-4">
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-slate-300">
+                分发包 · {packageResult.file_name} · {packageResult.file_count} 个文件
+              </p>
+              <p className="mt-1 break-all font-mono text-[11px] text-slate-500">
+                {packageResult.path}
+              </p>
+              <p className="mt-1 break-all font-mono text-[10px] text-slate-600">
+                SHA-256 {packageResult.sha256}
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => setPackageResult(null)}>
+              关闭
+            </Button>
+          </div>
+        </Card>
       ) : null}
 
       {!currentId ? (
@@ -259,7 +407,7 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
                 description={
                   kind === 'plugin'
                     ? '创建后会生成 plugin.rb、语言文件与客户端初始化器，并直接放在源码的 plugins/ 目录。'
-                    : '创建后会生成 about.json、SCSS 目录与 README，可用于 discourse_theme 工作流。'
+                    : '创建后会生成 about.json、SCSS 目录与 README，可构建 ZIP 或导入本地 Discourse 预览。'
                 }
                 action={
                   <Button onClick={openModal} disabled={!canCreate}>
@@ -279,6 +427,11 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
                           {item.name}
                         </h3>
                         <Badge tone="cyan">{item.slug}</Badge>
+                        {kind === 'plugin' ? (
+                          <Badge tone={item.enabled ? 'emerald' : 'slate'}>
+                            {item.enabled ? '已启用' : '已禁用'}
+                          </Badge>
+                        ) : null}
                         {item.version ? <Badge tone="slate">v{item.version}</Badge> : null}
                         <Badge tone={item.has_metadata ? 'emerald' : 'amber'}>
                           {item.has_metadata ? '元数据已解析' : '缺少元数据'}
@@ -297,11 +450,93 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
                     <MetaRow label="目录" value={item.path} mono title={item.path} />
                   </dl>
 
-                  <p className="mt-4 border-t border-slate-800/70 pt-3 text-[11px] leading-5 text-slate-500">
-                    {kind === 'plugin'
-                      ? '修改插件后需重启 Rails 开发服务器；Discourse 会自动加载 plugins/ 下的目录。'
-                      : '在主题目录中运行 discourse_theme watch . 可将本地修改同步到运行中的 Discourse。'}
-                  </p>
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/70 pt-3">
+                    <p className="min-w-0 flex-1 text-[11px] leading-5 text-slate-500">
+                      {kind === 'plugin'
+                        ? item.enabled
+                          ? '修改插件后需重启 Rails 开发服务器；ZIP 会排除 .git 与 node_modules。'
+                          : '插件已禁用，文件位于 data/disabled-plugins/；重新启用并重启 Rails 后才会加载。'
+                        : '构建会先运行依赖检查，再生成 ZIP；预览会导入当前运行中的本地 Discourse，需要管理员 API Key。'}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      {kind === 'plugin' ? (
+                        <Button
+                          size="sm"
+                          variant={item.enabled ? 'ghost' : 'secondary'}
+                          onClick={() => setToggleTarget(item)}
+                          disabled={
+                            togglePlugin.isPending || (!item.enabled && !sourceReady)
+                          }
+                          title={
+                            !item.enabled && !sourceReady
+                              ? '需要先在当前 Workspace 安装 Discourse 源码'
+                              : undefined
+                          }
+                        >
+                          {togglePlugin.isPending &&
+                          togglePlugin.variables?.slug === item.slug ? (
+                            <Spinner className="h-3.5 w-3.5" />
+                          ) : null}
+                          {item.enabled ? '禁用' : '启用'}
+                        </Button>
+                      ) : null}
+                      {kind === 'plugin' && item.enabled ? (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => openTest(item)}
+                          disabled={test.isPending || testRunning || !sourceReady}
+                          title={!sourceReady ? '需要先在当前 Workspace 安装 Discourse 源码' : undefined}
+                        >
+                          {test.isPending && test.variables?.slug === item.slug ? (
+                            <Spinner className="h-3.5 w-3.5" />
+                          ) : null}
+                          运行测试
+                        </Button>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => openCheck(item)}
+                        disabled={check.isPending}
+                      >
+                        {check.isPending && check.variables?.slug === item.slug ? (
+                          <Spinner className="h-3.5 w-3.5" />
+                        ) : null}
+                        依赖检查
+                      </Button>
+                      {kind === 'theme' ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => openTheme(item, 'build')}
+                          >
+                            构建
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            onClick={() => openTheme(item, 'preview')}
+                          >
+                            预览
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => packageZip.mutate(item.slug)}
+                          disabled={packageZip.isPending}
+                        >
+                          {packageZip.isPending && packageZip.variables === item.slug ? (
+                            <Spinner className="h-3.5 w-3.5" />
+                          ) : null}
+                          打包 ZIP
+                        </Button>
+                      )}
+                    </div>
+                  </div>
                 </Card>
               ))}
             </div>
@@ -413,6 +648,188 @@ export function ExtensionsPage({ kind }: { kind: ExtensionKind }) {
           ) : null}
         </form>
       </Modal>
+
+      <Modal
+        open={Boolean(toggleTarget)}
+        onClose={() => {
+          if (!togglePlugin.isPending) {
+            setToggleTarget(null)
+          }
+        }}
+        title={toggleTarget?.enabled ? '禁用插件' : '启用插件'}
+        description={
+          toggleTarget?.enabled
+            ? '禁用会把插件移出源码的 plugins/ 目录，Discourse 重启后不再加载。'
+            : '启用会把插件移回源码的 plugins/ 目录，需要重启 Rails 后才会加载。'
+        }
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => setToggleTarget(null)}
+              disabled={togglePlugin.isPending}
+            >
+              取消
+            </Button>
+            <Button
+              variant={toggleTarget?.enabled ? 'danger' : 'primary'}
+              onClick={() => {
+                if (toggleTarget) {
+                  togglePlugin.mutate(toggleTarget)
+                }
+              }}
+              disabled={togglePlugin.isPending}
+            >
+              {togglePlugin.isPending ? <Spinner /> : null}
+              {toggleTarget?.enabled ? '确认禁用' : '确认启用'}
+            </Button>
+          </>
+        }
+      >
+        {toggleTarget ? (
+          <div className="space-y-3 text-sm text-slate-300">
+            <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2">
+              <p className="font-medium text-slate-100">
+                {toggleTarget.name}（{toggleTarget.slug}）
+              </p>
+              <p className="mt-1 break-all font-mono text-[11px] text-slate-500">
+                {toggleTarget.path}
+              </p>
+            </div>
+            <p className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs leading-5 text-amber-200">
+              该操作会移动插件目录，要求当前 Workspace 的项目已停止。移动完成后，需要重启 Rails
+              开发服务器才会生效。
+            </p>
+          </div>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(checkTarget)}
+        onClose={closeCheck}
+        title={`${texts.singular}依赖检查`}
+        description={
+          checkTarget
+            ? `${checkTarget.name}（${checkTarget.slug}）· ${checkTarget.path}`
+            : undefined
+        }
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeCheck} disabled={check.isPending}>
+              关闭
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                if (checkTarget) {
+                  check.mutate(checkTarget)
+                }
+              }}
+              disabled={check.isPending}
+            >
+              {check.isPending ? <Spinner /> : null}
+              重新检查
+            </Button>
+          </>
+        }
+      >
+        {check.isPending || !checkReport ? (
+          <div className="flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-6 text-sm text-slate-300">
+            <Spinner />
+            正在检查元数据、依赖与 Discourse 版本兼容性…
+          </div>
+        ) : (
+          <ExtensionCheckView report={checkReport} />
+        )}
+      </Modal>
+
+      <Modal
+        open={Boolean(testTarget)}
+        onClose={closeTest}
+        title="运行插件测试"
+        description={
+          testTarget ? `${testTarget.name}（${testTarget.slug}）· RAILS_ENV=test` : undefined
+        }
+        width="max-w-3xl"
+        footer={
+          <Button variant="ghost" onClick={closeTest} disabled={test.isPending || testRunning}>
+            {testRunning ? '测试运行中…' : '关闭'}
+          </Button>
+        }
+      >
+        <div className="space-y-4">
+          <p className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-3 text-xs leading-5 text-slate-300">
+            测试使用当前 Workspace 的隔离测试数据库，首次运行会执行 db:create
+            与插件迁移，随后运行插件 spec/ 下的 RSpec。
+          </p>
+
+          {test.isPending || (!testRun && !testTask.error) ? (
+            <div className="flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-6 text-sm text-slate-300">
+              <Spinner />
+              正在提交插件测试任务…
+            </div>
+          ) : testTask.error ? (
+            <ErrorNotice error={testTask.error} onRetry={() => void testTask.refetch()} />
+          ) : testRun ? (
+            <>
+              <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={taskTone(testRun.status)}>{taskLabels[testRun.status]}</Badge>
+                    <span className="text-sm text-slate-300">{testRun.message || '准备测试'}</span>
+                  </div>
+                  <span className="font-mono text-xs text-slate-400">{testRun.progress}%</span>
+                </div>
+                <div className="mt-3">
+                  <ProgressBar value={testRun.progress} />
+                </div>
+                {testRun.error_message ? (
+                  <p className="mt-3 rounded-lg border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-xs leading-5 text-rose-200">
+                    {testRun.error_message}
+                  </p>
+                ) : null}
+              </div>
+
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-slate-300">插件测试日志</p>
+                  {testLog.data?.path ? (
+                    <p className="truncate font-mono text-[10px] text-slate-500" title={testLog.data.path}>
+                      {testLog.data.path}
+                    </p>
+                  ) : null}
+                </div>
+                {testLog.isLoading ? (
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-800 px-4 py-4 text-xs text-slate-400">
+                    <Spinner className="h-3.5 w-3.5" />
+                    正在读取测试日志…
+                  </div>
+                ) : testLog.error ? (
+                  <p className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-xs text-slate-400">
+                    日志尚未生成，测试开始后会自动显示。
+                  </p>
+                ) : (
+                  <pre className="max-h-80 overflow-auto rounded-xl border border-slate-800 bg-slate-950/70 p-3 font-mono text-[11px] leading-5 text-slate-300">
+                    {testLog.data?.lines?.length
+                      ? testLog.data.lines.join('\n')
+                      : '（暂无日志输出）'}
+                  </pre>
+                )}
+              </div>
+            </>
+          ) : null}
+        </div>
+      </Modal>
+
+      {themeTarget ? (
+        <ThemeWorkbench
+          key={`${themeTarget.slug}:${themeMode}`}
+          workspaceId={currentId}
+          item={themeTarget}
+          mode={themeMode}
+          onClose={() => setThemeTarget(null)}
+        />
+      ) : null}
     </div>
   )
 }

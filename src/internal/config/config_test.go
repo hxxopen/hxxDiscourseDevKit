@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 )
 
@@ -21,6 +22,26 @@ func TestDefaultConfigIsValid(t *testing.T) {
 	}
 	if cfg.ActiveWorkspaceID != "" || cfg.WorkspacesInitialized {
 		t.Error("new config should not claim an initialized workspace")
+	}
+}
+
+func TestApplyDefaultsFillsManagedServiceFields(t *testing.T) {
+	paths := NewPaths(t.TempDir())
+	cfg := Config{}
+	cfg.Services.PostgreSQL.Mode = "managed"
+	cfg.Services.Redis.Mode = "managed"
+
+	cfg.ApplyDefaults(paths)
+
+	pg := cfg.Services.PostgreSQL
+	if pg.Host != "127.0.0.1" || pg.Port != 15432 || pg.AdminUser != "hxxddk_admin" ||
+		pg.AdminPasswordRef != "pg_admin" || pg.DataDir != "services/postgresql/data" {
+		t.Errorf("postgres defaults = %+v", pg)
+	}
+	redis := cfg.Services.Redis
+	if redis.Host != "127.0.0.1" || redis.Port != 16379 ||
+		redis.PasswordRef != "redis_password" || redis.DataDir != "services/redis/data" {
+		t.Errorf("redis defaults = %+v", redis)
 	}
 }
 
@@ -100,5 +121,45 @@ func TestStoreRejectsInvalidUpdate(t *testing.T) {
 	}
 	if got := store.Get().Network.Host; got != "127.0.0.1" {
 		t.Fatalf("in-memory config changed after rejected update: %q", got)
+	}
+}
+
+func TestSetDataRootRelocatesProjectAndServiceData(t *testing.T) {
+	root := t.TempDir()
+	dataRoot := t.TempDir()
+	paths := NewPaths(root)
+	paths.SetDataRoot(dataRoot)
+
+	if !paths.UsesSplitDataRoot() {
+		t.Fatal("expected split data root")
+	}
+	if paths.ConfigDir != filepath.Join(root, "config") {
+		t.Errorf("config dir moved unexpectedly: %s", paths.ConfigDir)
+	}
+	if paths.WorkspacesDir != filepath.Join(dataRoot, "workspaces") {
+		t.Errorf("workspaces dir = %s", paths.WorkspacesDir)
+	}
+	got := paths.ResolveDataDir("services/postgresql/data")
+	want := filepath.Join(dataRoot, "services", "postgresql", "data")
+	if got != want {
+		t.Errorf("ResolveDataDir = %s, want %s", got, want)
+	}
+
+	paths.SetDataRoot("")
+	if paths.UsesSplitDataRoot() || paths.DataRoot != paths.Root {
+		t.Errorf("empty data root should fall back to root, got %s", paths.DataRoot)
+	}
+}
+
+func TestValidateStorageDataRoot(t *testing.T) {
+	paths := NewPaths(t.TempDir())
+	cfg := Default(paths)
+	cfg.Storage.DataRoot = "relative/data"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected relative data root to be rejected")
+	}
+	cfg.Storage.DataRoot = `\\wsl.localhost\Ubuntu-22.04\home\dev\data`
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("UNC data root rejected: %v", err)
 	}
 }

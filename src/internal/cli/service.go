@@ -365,5 +365,9 @@ func printRuntimeUsage(w io.Writer) {
 
   list                验证并列出全部 Runtime 组件
   verify [name]       验证一个或全部组件
+  wsl                 查看 WSL2 执行环境
+  discover            重新探测组件路径并写入发现文件
+  install [--yes] [component...]
+                      预览并安装组件到 WSL2（未加 --yes 仅预览）
 `)
 }

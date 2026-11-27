@@ -1,5 +1,7 @@
 import type {
   ActivateResponse,
+  AuditFilter,
+  AuditList,
   Backup,
   BackupCreateInput,
   BackupList,
@@ -7,10 +9,12 @@ import type {
   DatabasesResponse,
   DeletePlan,
   DiagnosticsReport,
+  ExtensionCheckReport,
   ExtensionCreateInput,
   ExtensionItem,
   ExtensionKind,
   ExtensionListing,
+  ExtensionPackage,
   Info,
   LogContent,
   LogSourcesResponse,
@@ -20,9 +24,17 @@ import type {
   ProjectResponse,
   ProjectSourceInput,
   ProjectStatus,
+  ProfileCheckReport,
+  ProfileList,
+  ProjectProfile,
+  ProfileSource,
+  ProfileSourceInput,
+  ProfileSourceList,
   RestorePreview,
   RuntimeComponent,
   RuntimeComponentsResponse,
+  RuntimeDiscoverResponse,
+  RuntimeInstallPlan,
   RuntimeMatrixResponse,
   ServiceActionResponse,
   ServiceConfigInput,
@@ -34,8 +46,12 @@ import type {
   SessionResponse,
   SettingsInput,
   SettingsResponse,
+  StorageMigrationPlan,
   Task,
   TaskAccepted,
+  ThemeBuildResult,
+  ThemePreviewResult,
+  WSLStatus,
   Workspace,
   WorkspaceList,
   WorkspaceStatusResponse,
@@ -110,7 +126,10 @@ async function request<T>(
   body?: unknown,
   retried = false,
 ): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'X-DevKit-Client': 'ui',
+  }
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json'
   }
@@ -160,6 +179,20 @@ export const api = {
   updateSettings: (input: SettingsInput) =>
     request<SettingsResponse>('PATCH', '/settings', input),
 
+  setThemePreviewKey: (apiKey: string) =>
+    request<SettingsResponse>('PUT', '/settings/theme-preview', { api_key: apiKey }),
+
+  clearThemePreviewKey: () =>
+    request<SettingsResponse>('DELETE', '/settings/theme-preview'),
+
+  previewStorageMigration: () =>
+    request<StorageMigrationPlan>('POST', '/settings/storage/migration/preview'),
+
+  startStorageMigration: (confirmToken: string) =>
+    request<TaskAccepted>('POST', '/settings/storage/migration', {
+      confirm_token: confirmToken,
+    }),
+
   logSources: () => request<LogSourcesResponse>('GET', '/logs/sources'),
 
   log: (source: string, tail = 200) =>
@@ -167,6 +200,49 @@ export const api = {
       'GET',
       `/logs?source=${encodeURIComponent(source)}&tail=${tail}`,
     ),
+
+  audit: (filter: AuditFilter = {}) => {
+    const params = new URLSearchParams()
+    if (filter.limit) {
+      params.set('limit', String(filter.limit))
+    }
+    if (filter.action) {
+      params.set('action', filter.action)
+    }
+    if (filter.workspaceId) {
+      params.set('workspace_id', filter.workspaceId)
+    }
+    if (filter.result) {
+      params.set('result', filter.result)
+    }
+    if (filter.since) {
+      params.set('since', filter.since)
+    }
+    const suffix = params.toString()
+    return request<AuditList>('GET', suffix ? `/audit?${suffix}` : '/audit')
+  },
+
+  profiles: () => request<ProfileList>('GET', '/profiles'),
+
+  profile: (id: string) =>
+    request<ProjectProfile>('GET', `/profiles/${encodeURIComponent(id)}`),
+
+  profileCheck: (id: string) =>
+    request<ProfileCheckReport>('GET', `/profiles/${encodeURIComponent(id)}/check`),
+
+  profileSources: () => request<ProfileSourceList>('GET', '/profile-sources'),
+
+  addProfileSource: (input: ProfileSourceInput) =>
+    request<ProfileSource>('POST', '/profile-sources', input),
+
+  refreshProfileSource: (id: string) =>
+    request<ProfileSource>(
+      'POST',
+      `/profile-sources/${encodeURIComponent(id)}/refresh`,
+    ),
+
+  removeProfileSource: (id: string) =>
+    request<null>('DELETE', `/profile-sources/${encodeURIComponent(id)}`),
 
   workspaces: () => request<WorkspaceList>('GET', '/workspaces'),
 
@@ -266,6 +342,43 @@ export const api = {
   createExtension: (kind: ExtensionKind, id: string, input: ExtensionCreateInput) =>
     request<ExtensionItem>('POST', `${workspacePath(id)}/${kind}s`, input),
 
+  checkExtension: (kind: ExtensionKind, id: string, slug: string) =>
+    request<ExtensionCheckReport>(
+      'GET',
+      `${workspacePath(id)}/${kind}s/${encodeURIComponent(slug)}/check`,
+    ),
+
+  packageExtension: (kind: ExtensionKind, id: string, slug: string) =>
+    request<ExtensionPackage>(
+      'POST',
+      `${workspacePath(id)}/${kind}s/${encodeURIComponent(slug)}/package`,
+    ),
+
+  buildTheme: (id: string, slug: string) =>
+    request<ThemeBuildResult>(
+      'POST',
+      `${workspacePath(id)}/themes/${encodeURIComponent(slug)}/build`,
+    ),
+
+  previewTheme: (id: string, slug: string, apiKey?: string) =>
+    request<ThemePreviewResult>(
+      'POST',
+      `${workspacePath(id)}/themes/${encodeURIComponent(slug)}/preview`,
+      apiKey ? { api_key: apiKey } : {},
+    ),
+
+  testPlugin: (id: string, slug: string) =>
+    request<TaskAccepted>(
+      'POST',
+      `${workspacePath(id)}/plugins/${encodeURIComponent(slug)}/test`,
+    ),
+
+  setPluginEnabled: (id: string, slug: string, enabled: boolean) =>
+    request<ExtensionItem>(
+      'POST',
+      `${workspacePath(id)}/plugins/${encodeURIComponent(slug)}/${enabled ? 'enable' : 'disable'}`,
+    ),
+
   task: (id: string) => request<Task>('GET', `/tasks/${encodeURIComponent(id)}`),
 
   cancelTask: (id: string) =>
@@ -281,6 +394,21 @@ export const api = {
 
   verifyAllRuntime: () =>
     request<RuntimeComponentsResponse>('POST', '/runtime/verify'),
+
+  runtimeWSL: () => request<WSLStatus>('GET', '/runtime/wsl'),
+
+  discoverRuntime: () =>
+    request<RuntimeDiscoverResponse>('POST', '/runtime/discover'),
+
+  previewRuntimeInstall: (components?: string[]) =>
+    request<RuntimeInstallPlan>('POST', '/runtime/install-preview', {
+      components: components ?? [],
+    }),
+
+  installRuntime: (confirmToken: string) =>
+    request<TaskAccepted>('POST', '/runtime/install', {
+      confirm_token: confirmToken,
+    }),
 
   services: () => request<ServiceList>('GET', '/services'),
 

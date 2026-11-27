@@ -47,10 +47,10 @@ func (m *Manager) redisStatus(ctx context.Context) Status {
 		return status
 	}
 
-	found, err := m.runtime.FindBinary(ctx, "redis-server")
+	found, err := m.runtime.FindComponent(ctx, "redis")
 	if err != nil {
 		status.State = StateNotInstalled
-		status.Message = "未找到 redis-server；请安装 Redis 或在版本矩阵中配置路径"
+		status.Message = "未找到 redis-server；请在「运行时」页面安装 Redis，或在版本矩阵中配置路径"
 		return status
 	}
 	status.Path = found.Path
@@ -95,7 +95,7 @@ func (m *Manager) startRedis(ctx context.Context, progress func(int, string)) er
 	if cfg.Mode == "external" {
 		return ErrExternal
 	}
-	found, err := m.runtime.FindBinary(ctx, "redis-server")
+	found, err := m.runtime.FindComponent(ctx, "redis")
 	if err != nil {
 		return fmt.Errorf("%w: 未找到 redis-server", ErrNotInstalled)
 	}
@@ -116,7 +116,7 @@ func (m *Manager) startRedis(ctx context.Context, progress func(int, string)) er
 	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+	if err := m.runtime.EnsureDir(ctx, found.Execution, dataDir, 0o700); err != nil {
 		return err
 	}
 	logPath := filepath.Join(serviceDir, "redis.log")
@@ -129,6 +129,11 @@ func (m *Manager) startRedis(ctx context.Context, progress func(int, string)) er
 	if err != nil {
 		return err
 	}
+	// endpoint was resolved before the secret existed, so its password may be
+	// empty on the first start. The probe below must authenticate with the
+	// password just persisted, otherwise a perfectly healthy Redis looks
+	// unreachable until the next request re-reads the secret.
+	endpoint.Password = password
 	execDataDir, err := m.resolveConfiguredPath(dataDir, found.Execution)
 	if err != nil {
 		return err
@@ -142,10 +147,20 @@ func (m *Manager) startRedis(ctx context.Context, progress func(int, string)) er
 		return err
 	}
 
+	// wsl.exe stays alive for as long as the Linux foreground process runs.
+	// With daemonize no that leaves a console window (titled wsl.exe) open for
+	// the whole Redis lifetime, even though the child was started detached and
+	// hidden. Daemonize inside the distribution instead so wsl.exe exits
+	// immediately.
+	wsl := runtime.IsWSL(found.Execution)
+	daemonize := "no"
+	if wsl {
+		daemonize = "yes"
+	}
 	conf := fmt.Sprintf(`bind %s
 protected-mode yes
 port %d
-daemonize no
+daemonize %s
 dir "%s"
 dbfilename dump.rdb
 save 3600 1
@@ -154,22 +169,32 @@ appendfsync everysec
 requirepass "%s"
 logfile "%s"
 loglevel notice
-`, redisConfValue(cfg.Host), cfg.Port, redisConfValue(filepath.ToSlash(execDataDir)),
+`, redisConfValue(cfg.Host), cfg.Port, daemonize, redisConfValue(filepath.ToSlash(execDataDir)),
 		redisConfValue(password), redisConfValue(filepath.ToSlash(execLogPath)))
 	if err := store.WriteFileAtomicProtected(confPath, []byte(conf), 0o600, secret.ProtectFile); err != nil {
 		return fmt.Errorf("写入 Redis 配置: %w", err)
 	}
 
 	progress(40, "启动 Redis")
-	command, err := m.runtime.CommandFound(ctx, found, []string{execConfPath}, nil)
-	if err != nil {
-		return err
+	if wsl {
+		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		run, err := m.runtime.RunFound(runCtx, found, runtime.RunOptions{Args: []string{execConfPath}})
+		if err != nil || run.ExitCode != 0 {
+			return fmt.Errorf("启动 Redis 失败: %s", commandError(run, err))
+		}
+		m.log.Info("redis process started", "execution", found.Execution, "daemonized", true)
+	} else {
+		command, err := m.runtime.CommandFound(ctx, found, []string{execConfPath}, nil)
+		if err != nil {
+			return err
+		}
+		pid, err := startDetached(command.Path, command.Args, command.Env, logPath)
+		if err != nil {
+			return fmt.Errorf("启动 Redis 失败: %w", err)
+		}
+		m.log.Info("redis process started", "pid", pid, "execution", found.Execution)
 	}
-	pid, err := startDetached(command.Path, command.Args, command.Env, logPath)
-	if err != nil {
-		return fmt.Errorf("启动 Redis 失败: %w", err)
-	}
-	m.log.Info("redis process started", "pid", pid, "execution", found.Execution)
 
 	deadline := m.now().Add(15 * time.Second)
 	for {

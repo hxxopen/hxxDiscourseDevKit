@@ -6,48 +6,157 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
-// Paths describes the on-disk layout of one DevKit instance root.
+// Paths describes the on-disk layout of one DevKit instance root. Config,
+// logs, and run state always live under Root. Project and service data may be
+// relocated to DataRoot, which on Windows defaults to a path inside WSL2 so
+// PostgreSQL can initialize a native Linux data directory.
 type Paths struct {
-	Root          string
-	ConfigDir     string
-	WorkspacesDir string
-	RuntimeDir    string
-	ServicesDir   string
-	LogsDir       string
-	RunDir        string
-	BackupsDir    string
-	TmpDir        string
+	Root              string
+	DataRoot          string
+	ConfigDir         string
+	WorkspacesDir     string
+	ProfileSourcesDir string
+	RuntimeDir        string
+	ServicesDir       string
+	LogsDir           string
+	AuditDir          string
+	RunDir            string
+	BackupsDir        string
+	TmpDir            string
+	// LegacyDataRoot reports that the instance predates the split data root
+	// and still stores project/service data under Root.
+	LegacyDataRoot bool
 }
 
-// NewPaths derives the standard layout from root.
+// NewPaths derives the standard layout from root. Data directories initially
+// live under root; call SetDataRoot to relocate them.
 func NewPaths(root string) *Paths {
 	root = filepath.Clean(root)
-	return &Paths{
-		Root:          root,
-		ConfigDir:     filepath.Join(root, "config"),
-		WorkspacesDir: filepath.Join(root, "workspaces"),
-		RuntimeDir:    filepath.Join(root, "runtime"),
-		ServicesDir:   filepath.Join(root, "services"),
-		LogsDir:       filepath.Join(root, "logs"),
-		RunDir:        filepath.Join(root, "run"),
-		BackupsDir:    filepath.Join(root, "backups"),
-		TmpDir:        filepath.Join(root, "tmp"),
+	p := &Paths{
+		Root:              root,
+		ConfigDir:         filepath.Join(root, "config"),
+		ProfileSourcesDir: filepath.Join(root, "profiles"),
+		RuntimeDir:        filepath.Join(root, "runtime"),
+		LogsDir:           filepath.Join(root, "logs"),
+		AuditDir:          filepath.Join(root, "logs", "audit"),
+		RunDir:            filepath.Join(root, "run"),
 	}
+	p.SetDataRoot(root)
+	return p
+}
+
+// SetDataRoot relocates project, service, backup, and temporary data. An empty
+// value keeps them under Root.
+func (p *Paths) SetDataRoot(dataRoot string) {
+	dataRoot = filepath.Clean(strings.TrimSpace(dataRoot))
+	if dataRoot == "" || dataRoot == "." {
+		dataRoot = p.Root
+	}
+	p.DataRoot = dataRoot
+	p.WorkspacesDir = filepath.Join(dataRoot, "workspaces")
+	p.ServicesDir = filepath.Join(dataRoot, "services")
+	p.BackupsDir = filepath.Join(dataRoot, "backups")
+	p.TmpDir = filepath.Join(dataRoot, "tmp")
+}
+
+// UsesSplitDataRoot reports whether data lives outside the configuration root.
+func (p *Paths) UsesSplitDataRoot() bool {
+	return !samePath(p.DataRoot, p.Root)
 }
 
 // Ensure creates every directory required before startup.
 func (p *Paths) Ensure() error {
+	if err := p.EnsureBase(); err != nil {
+		return err
+	}
+	return p.EnsureDataDirs()
+}
+
+// EnsureBase creates configuration, log, and run directories that must exist
+// before the data root is known.
+func (p *Paths) EnsureBase() error {
 	for _, dir := range []string{
-		p.Root, p.ConfigDir, p.WorkspacesDir, p.RuntimeDir, p.ServicesDir,
-		p.LogsDir, p.RunDir, p.BackupsDir, p.TmpDir,
+		p.Root, p.ConfigDir, p.ProfileSourcesDir, p.RuntimeDir,
+		p.LogsDir, p.AuditDir, p.RunDir,
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
 	return nil
+}
+
+// EnsureDataDirs creates project and service data directories.
+func (p *Paths) EnsureDataDirs() error {
+	for _, dir := range []string{
+		p.WorkspacesDir, p.ServicesDir, p.BackupsDir, p.TmpDir,
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	aa, errA := filepath.Abs(a)
+	bb, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
+	}
+	return filepath.Clean(aa) == filepath.Clean(bb)
+}
+
+// SamePath reports whether two paths refer to the same location. Windows
+// comparisons are case-insensitive.
+func SamePath(a, b string) bool {
+	return samePath(a, b)
+}
+
+// RelWithin reports whether candidate is inside root and returns the relative
+// path. It rejects paths that escape root or live on another volume.
+func RelWithin(root, candidate string) (string, bool) {
+	if strings.TrimSpace(root) == "" || strings.TrimSpace(candidate) == "" {
+		return "", false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(rootAbs, candidateAbs)
+	if err != nil {
+		return "", false
+	}
+	if rel == "." {
+		return rel, true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return rel, true
+}
+
+// DataRootPending reports that configured points somewhere other than the data
+// root this process is using, which means a restart is needed to apply it.
+func (p *Paths) DataRootPending(configured string) bool {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return false
+	}
+	return !samePath(configured, p.DataRoot)
 }
 
 // ConfigFile is the path to devkit.json.
@@ -58,6 +167,16 @@ func (p *Paths) SecretsFile() string { return filepath.Join(p.ConfigDir, "secret
 
 // RuntimeMatrixFile is the path to runtime-matrix.json.
 func (p *Paths) RuntimeMatrixFile() string { return filepath.Join(p.ConfigDir, "runtime-matrix.json") }
+
+// ProfileSourcesFile is the path to the third-party template source registry.
+func (p *Paths) ProfileSourcesFile() string {
+	return filepath.Join(p.ConfigDir, "profile-sources.json")
+}
+
+// ProfileSourceDir returns the DevKit-owned checkout for a Git profile source.
+func (p *Paths) ProfileSourceDir(id string) string {
+	return filepath.Join(p.ProfileSourcesDir, id)
+}
 
 // LockFile is the single-instance lock path.
 func (p *Paths) LockFile() string { return filepath.Join(p.RunDir, "devkitd.lock") }
@@ -75,7 +194,7 @@ func (p *Paths) WorkspaceDir(id string) string { return filepath.Join(p.Workspac
 func (p *Paths) ServiceDir(name string) string { return filepath.Join(p.ServicesDir, name) }
 
 // ResolveDataDir resolves a configured service data directory. Relative values
-// are rooted at the instance root; absolute values are used as-is.
+// are rooted at the data root; absolute values are used as-is.
 func (p *Paths) ResolveDataDir(value string) string {
 	if value == "" {
 		return ""
@@ -83,7 +202,13 @@ func (p *Paths) ResolveDataDir(value string) string {
 	if filepath.IsAbs(value) {
 		return filepath.Clean(value)
 	}
-	return filepath.Join(p.Root, value)
+	return filepath.Join(p.DataRoot, value)
+}
+
+// ConfigExists reports whether the instance configuration already exists.
+func ConfigExists(p *Paths) bool {
+	info, err := os.Stat(p.ConfigFile())
+	return err == nil && !info.IsDir()
 }
 
 // DefaultRoot returns the platform default instance root.

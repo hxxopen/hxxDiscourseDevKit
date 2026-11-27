@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "name": "Acme 团队模板",
+  "version": "2026.11.1",
+  "description": "示例第三方 Project Profile 来源。DevKit 只读取本清单中的声明数据，不会执行仓库中的任何脚本。",
+  "profiles": [
+    {
+      "id": "acme-discourse-plugin",
+      "name": "Acme 插件开发模板",
+      "description": "以官方 Discourse 为宿主的插件开发模板；创建时需提供团队自己的源码仓库，插件位于 plugins/ 目录。",
+      "category": "third-party",
+      "project_type": "discourse-plugin",
+      "source_required": true,
+      "extension_kind": "plugin",
+      "runtime_components": ["ruby", "node", "git"],
+      "services": ["postgresql", "redis"],
+      "operations": [
+        {
+          "id": "workspace.create",
+          "title": "创建 Workspace 目录",
+          "description": "在实例根目录下创建独立 Workspace 与元数据文件。",
+          "destructive": false
+        },
+        {
+          "id": "source.configure",
+          "title": "配置源码仓库",
+          "description": "记录指定的 Git 仓库与分支，供后续克隆使用。",
+          "destructive": false
+        },
+        {
+          "id": "database.provision",
+          "title": "准备开发数据库",
+          "description": "在共享 PostgreSQL 中创建独立数据库与账号。",
+          "destructive": false
+        }
+      ],
+      "permissions": [
+        {
+          "id": "workspace.write",
+          "title": "写入实例目录",
+          "description": "在实例根目录内创建 Workspace 子目录。",
+          "risk": "low"
+        },
+        {
+          "id": "database.create",
+          "title": "创建数据库",
+          "description": "在共享 PostgreSQL 中创建数据库和账号。",
+          "risk": "medium"
+        },
+        {
+          "id": "secret.write",
+          "title": "写入本地凭据",
+          "description": "把生成的数据库密码写入 Workspace 的受限权限配置文件。",
+          "risk": "medium"
+        }
+      ]
+    }
+  ]
+}

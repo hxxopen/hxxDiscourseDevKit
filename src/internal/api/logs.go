@@ -106,6 +106,12 @@ func (s *Server) logSources(r *http.Request) []logSource {
 		newLogSource("tasks", "任务历史", "devkit", "tasks", "",
 			filepath.Join(s.opts.Paths.LogsDir, "tasks.jsonl")),
 	)
+	if s.opts.Runtime != nil {
+		items = append(items, newLogSource(
+			"runtime-install", "运行时安装日志", "runtime", "install", "",
+			s.opts.Runtime.InstallLogPath(),
+		))
+	}
 
 	if s.opts.Services != nil {
 		for _, service := range []struct {
@@ -134,6 +140,7 @@ func (s *Server) logSources(r *http.Request) []logSource {
 					{"project", "Rails 进程日志"},
 					{"init", "初始化日志"},
 					{"git", "Git 操作日志"},
+					{"test", "插件测试日志"},
 				} {
 					items = append(items, newLogSource(
 						fmt.Sprintf("workspace:%s:%s", ws.WorkspaceID, kind.name),

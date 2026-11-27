@@ -7,10 +7,13 @@ import (
 	"github.com/hxx/hxxDiscourseDevKit/internal/backup"
 	"github.com/hxx/hxxDiscourseDevKit/internal/extension"
 	"github.com/hxx/hxxDiscourseDevKit/internal/httpx"
+	"github.com/hxx/hxxDiscourseDevKit/internal/migration"
+	"github.com/hxx/hxxDiscourseDevKit/internal/profile"
 	"github.com/hxx/hxxDiscourseDevKit/internal/project"
 	"github.com/hxx/hxxDiscourseDevKit/internal/runtime"
 	"github.com/hxx/hxxDiscourseDevKit/internal/service"
 	"github.com/hxx/hxxDiscourseDevKit/internal/task"
+	"github.com/hxx/hxxDiscourseDevKit/internal/themepreview"
 	"github.com/hxx/hxxDiscourseDevKit/internal/workspace"
 )
 
@@ -35,12 +38,36 @@ func mapError(err error) error {
 		return httpx.Conflict("REDIS_DB_EXHAUSTED", "没有可用的 Redis DB 索引（上限 15 个 Workspace）")
 	case errors.Is(err, workspace.ErrConfirmToken):
 		return httpx.Unprocessable("PREVIEW_REQUIRED", "删除操作需要有效的预览确认令牌")
+	case errors.Is(err, profile.ErrNotFound):
+		return httpx.NotFound("PROFILE_NOT_FOUND", err.Error())
+	case errors.Is(err, profile.ErrSourcesDisabled):
+		return errFeatureUnavailable("第三方 Project Profile 来源")
+	case errors.Is(err, profile.ErrSourceNotFound):
+		return httpx.NotFound("PROFILE_SOURCE_NOT_FOUND", err.Error())
+	case errors.Is(err, profile.ErrSourceExists):
+		return httpx.Conflict("PROFILE_SOURCE_EXISTS", err.Error())
+	case errors.Is(err, profile.ErrSourceConflict):
+		return httpx.Conflict("PROFILE_SOURCE_CONFLICT", err.Error())
+	case errors.Is(err, profile.ErrGitUnavailable):
+		return httpx.New(http.StatusServiceUnavailable, "PROFILE_SOURCE_GIT_UNAVAILABLE", err.Error())
+	case errors.Is(err, profile.ErrSourceUnavailable):
+		return httpx.New(http.StatusBadGateway, "PROFILE_SOURCE_UNAVAILABLE", err.Error())
+	case errors.Is(err, profile.ErrSourceInvalid):
+		return httpx.Unprocessable("PROFILE_SOURCE_INVALID", err.Error())
 	case errors.Is(err, task.ErrNotFound):
 		return httpx.NotFound("TASK_NOT_FOUND", "任务不存在")
 	case errors.Is(err, task.ErrNotCancelable):
 		return httpx.Conflict("TASK_NOT_CANCELABLE", "任务不可取消或已结束")
 	case errors.Is(err, runtime.ErrUnknownComponent):
 		return httpx.NotFound("RUNTIME_COMPONENT_NOT_FOUND", err.Error())
+	case errors.Is(err, runtime.ErrWSLUnsupported):
+		return httpx.New(http.StatusNotImplemented, "RUNTIME_INSTALL_UNSUPPORTED", err.Error())
+	case errors.Is(err, runtime.ErrWSLUnavailable):
+		return httpx.New(http.StatusServiceUnavailable, "RUNTIME_WSL_UNAVAILABLE", err.Error())
+	case errors.Is(err, runtime.ErrUnsupportedDistro):
+		return httpx.Conflict("RUNTIME_DISTRO_UNSUPPORTED", err.Error())
+	case errors.Is(err, runtime.ErrInstallConfirm):
+		return httpx.Unprocessable("PREVIEW_REQUIRED", err.Error())
 	case errors.Is(err, service.ErrUnknownService):
 		return httpx.NotFound("SERVICE_NOT_FOUND", err.Error())
 	case errors.Is(err, service.ErrExternal):
@@ -53,6 +80,8 @@ func mapError(err error) error {
 		return httpx.Conflict("SERVICE_NOT_RUNNING", err.Error())
 	case errors.Is(err, service.ErrValidation):
 		return httpx.BadRequest("SERVICE_VALIDATION_FAILED", err.Error())
+	case errors.Is(err, service.ErrDataDirUnsupported):
+		return httpx.Conflict("SERVICE_DATA_DIR_UNSUPPORTED", err.Error())
 	case errors.Is(err, project.ErrSourceNotConfigured):
 		return httpx.Conflict("SOURCE_NOT_CONFIGURED", err.Error())
 	case errors.Is(err, project.ErrSourceNotEmpty):
@@ -60,7 +89,7 @@ func mapError(err error) error {
 	case errors.Is(err, project.ErrSourceInstalled):
 		return httpx.Conflict("SOURCE_INSTALLED", err.Error())
 	case errors.Is(err, project.ErrSourceMissing):
-		return httpx.Conflict("SOURCE_MISSING", err.Error())
+		return httpx.Conflict("SOURCE_MISSING", "源码尚未安装，请先克隆源码")
 	case errors.Is(err, project.ErrNotGitRepository):
 		return httpx.Conflict("SOURCE_NOT_GIT", err.Error())
 	case errors.Is(err, project.ErrNotInitialized):
@@ -90,12 +119,54 @@ func mapError(err error) error {
 		return httpx.Conflict("INSUFFICIENT_SPACE", err.Error())
 	case errors.Is(err, backup.ErrWorkspaceMismatch):
 		return httpx.Conflict("BACKUP_WORKSPACE_MISMATCH", err.Error())
+	case errors.Is(err, migration.ErrConfirmToken):
+		return httpx.Unprocessable("PREVIEW_REQUIRED", "迁移操作需要有效的预览确认令牌")
+	case errors.Is(err, migration.ErrUnsupported), errors.Is(err, migration.ErrNotEligible):
+		return httpx.Conflict("STORAGE_MIGRATION_NOT_ELIGIBLE", err.Error())
+	case errors.Is(err, migration.ErrPendingRestart):
+		return httpx.Conflict("STORAGE_RESTART_REQUIRED", err.Error())
+	case errors.Is(err, migration.ErrWSLUnavailable):
+		return httpx.New(http.StatusServiceUnavailable, "STORAGE_MIGRATION_WSL_UNAVAILABLE", err.Error())
+	case errors.Is(err, migration.ErrTargetInvalid):
+		return httpx.Unprocessable("STORAGE_TARGET_INVALID", err.Error())
+	case errors.Is(err, migration.ErrBusy):
+		return httpx.Conflict("STORAGE_MIGRATION_BUSY", err.Error())
+	case errors.Is(err, migration.ErrMigrating):
+		return httpx.Conflict("STORAGE_MIGRATION_IN_PROGRESS", err.Error())
+	case errors.Is(err, migration.ErrPlanStale):
+		return httpx.Conflict("STORAGE_MIGRATION_PLAN_STALE", err.Error())
+	case errors.Is(err, migration.ErrBlocked), errors.Is(err, migration.ErrTargetPartial):
+		return httpx.Conflict("STORAGE_MIGRATION_BLOCKED", err.Error())
+	case errors.Is(err, migration.ErrSourceChanged):
+		return httpx.Conflict("STORAGE_SOURCE_CHANGED", err.Error())
+	case errors.Is(err, migration.ErrInsufficientSpace):
+		return httpx.Conflict("INSUFFICIENT_SPACE", err.Error())
+	case errors.Is(err, migration.ErrStopFailed):
+		return httpx.Conflict("STORAGE_STOP_FAILED", err.Error())
 	case errors.Is(err, extension.ErrExists):
 		return httpx.Conflict("EXTENSION_EXISTS", err.Error())
+	case errors.Is(err, extension.ErrNotFound):
+		return httpx.NotFound("EXTENSION_NOT_FOUND", err.Error())
 	case errors.Is(err, extension.ErrSourceMissing):
 		return httpx.Conflict("SOURCE_MISSING", err.Error())
+	case errors.Is(err, extension.ErrProjectRunning):
+		return httpx.Conflict("PROJECT_RUNNING", err.Error())
+	case errors.Is(err, extension.ErrStateConflict):
+		return httpx.Conflict("EXTENSION_STATE_CONFLICT", err.Error())
+	case errors.Is(err, extension.ErrNotInitialized):
+		return httpx.Conflict("PROJECT_NOT_INITIALIZED", err.Error())
 	case errors.Is(err, extension.ErrValidation):
 		return httpx.BadRequest("EXTENSION_VALIDATION_FAILED", err.Error())
+	case errors.Is(err, themepreview.ErrKeyRequired):
+		return httpx.BadRequest("THEME_PREVIEW_KEY_REQUIRED", err.Error())
+	case errors.Is(err, themepreview.ErrNotRunning):
+		return httpx.Conflict("THEME_PREVIEW_NOT_RUNNING",
+			"Workspace 项目未运行，请先在项目页启动 Discourse 后再预览主题")
+	case errors.Is(err, themepreview.ErrUnreachable):
+		return httpx.New(http.StatusBadGateway, "THEME_PREVIEW_UNREACHABLE",
+			"无法连接 Workspace 的 Discourse 站点："+err.Error())
+	case errors.Is(err, themepreview.ErrImportFailed):
+		return httpx.New(http.StatusBadGateway, "THEME_PREVIEW_IMPORT_FAILED", err.Error())
 	default:
 		var apiErr *httpx.Error
 		if errors.As(err, &apiErr) {

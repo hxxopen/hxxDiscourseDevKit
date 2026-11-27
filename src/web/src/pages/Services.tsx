@@ -264,8 +264,10 @@ export function Services() {
         <p className="mt-2 text-sm leading-6 text-slate-400">
           Managed 模式下 DevKit 使用 <code className="text-slate-300">initdb</code> 与{' '}
           <code className="text-slate-300">pg_ctl</code>、<code className="text-slate-300">redis-server</code>{' '}
-          启动本地实例，数据与日志保存在实例目录内。External 模式下凭据只写入受保护的本机密钥存储，不会出现在配置或日志中。
-          停止服务前会检查正在运行的 Workspace，存在依赖时会拒绝停止。
+          启动本地实例，数据与日志保存在实例目录内；管理员与 Workspace 凭据由 DevKit 自动生成并保存在本机密钥存储中。
+          External 模式下可在对应卡片的「配置」中填写已有服务的用户名与密码，凭据只写入受保护的本机密钥存储，不会出现在配置或日志中。
+          停止服务前会检查正在运行的 Workspace，存在依赖时会拒绝停止。Discourse 仅使用 PostgreSQL，不支持
+          MySQL/MariaDB。
         </p>
       </Card>
 
@@ -332,6 +334,7 @@ function ServiceCard({
   const state = status?.state ?? 'ERROR'
   const external = status?.mode === 'external'
   const running = state === 'RUNNING'
+  const notInstalled = state === 'NOT_INSTALLED'
   const busy = pendingAction !== null
   const canLogs = !external
 
@@ -372,6 +375,16 @@ function ServiceCard({
             </div>
           ) : null}
 
+          {notInstalled ? (
+            <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-xs leading-5 text-amber-100">
+              {meta.title} 尚未安装。到{' '}
+              <a href="#/runtime" className="font-semibold underline underline-offset-2">
+                运行时页面
+              </a>{' '}
+              的 WSL2 卡片中安装组件，安装完成后返回此页刷新状态。
+            </div>
+          ) : null}
+
           {status.message ? (
             <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-xs leading-5 text-slate-400">
               {status.message}
@@ -406,7 +419,7 @@ function ServiceCard({
                 <Button
                   size="sm"
                   onClick={() => onAction('start')}
-                  disabled={busy || running}
+                  disabled={busy || running || notInstalled}
                 >
                   {pendingAction === 'start' ? <Spinner className="h-3 w-3" /> : null}
                   启动
@@ -652,19 +665,24 @@ function ServiceConfigModal({
 
         {mode === 'managed' ? (
           name === 'postgresql' ? (
-            <Field
-              label="管理员用户"
-              htmlFor="service-admin-user"
-              hint="仅新初始化的数据目录使用；已存在的数据目录保留原管理员用户。"
-            >
-              <input
-                id="service-admin-user"
-                className={inputClass}
-                value={adminUser}
-                onChange={(event) => setAdminUser(event.target.value)}
-                placeholder="postgres"
-              />
-            </Field>
+            <div className="space-y-3">
+              <Field
+                label="管理员用户"
+                htmlFor="service-admin-user"
+                hint="仅新初始化的数据目录使用；已存在的数据目录保留原管理员用户。"
+              >
+                <input
+                  id="service-admin-user"
+                  className={inputClass}
+                  value={adminUser}
+                  onChange={(event) => setAdminUser(event.target.value)}
+                  placeholder="postgres"
+                />
+              </Field>
+              <p className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-xs leading-5 text-slate-400">
+                Managed PostgreSQL 的管理员密码与 Workspace 数据库用户密码由 DevKit 自动生成并保存在受保护的本机密钥存储中，不在此处显示或修改。如需连接已有数据库，请切换到 External 并填写用户名与密码。
+              </p>
+            </div>
           ) : (
             <p className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-xs leading-5 text-slate-400">
               Managed Redis 的密码自动生成并保存在受保护的本机密钥存储中。

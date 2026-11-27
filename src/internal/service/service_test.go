@@ -3,6 +3,7 @@ package service
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -46,6 +47,14 @@ func TestSQLQuoting(t *testing.T) {
 	}
 	if !strings.Contains(sql, `'p''ass'`) {
 		t.Error("password literal was not quoted")
+	}
+	// quote_ident takes a text expression, so the names must be SQL literals;
+	// unquoted names are parsed as column references and fail at runtime.
+	if !strings.Contains(sql, `quote_ident('db"name')`) {
+		t.Error("database name is not passed to quote_ident as a literal")
+	}
+	if !strings.Contains(sql, `quote_ident('user_name')`) {
+		t.Error("role name is not passed to quote_ident as a literal")
 	}
 	if !strings.Contains(sql, `ALTER ROLE "user_name" WITH LOGIN PASSWORD 'p''ass'`) {
 		t.Error("role password update missing")
@@ -221,4 +230,73 @@ func readRESPCommand(reader *bufio.Reader) ([]string, error) {
 
 func writeRESPLine(writer *bufio.Writer, line string) {
 	_, _ = writer.WriteString(line + "\r\n")
+}
+
+func TestValidatePostgresDataDirRejectsDrvFSMount(t *testing.T) {
+	hostPath := `D:\dev\devkit\services\postgresql\data`
+	execPath := "/mnt/d/dev/devkit/services/postgresql/data"
+
+	err := validatePostgresDataDir("wsl:Ubuntu-24.04", hostPath, execPath)
+	if !errors.Is(err, ErrDataDirUnsupported) {
+		t.Fatalf("expected ErrDataDirUnsupported, got %v", err)
+	}
+	for _, want := range []string{hostPath, execPath, "0700", "storage.data_root"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message missing %q: %s", want, err)
+		}
+	}
+
+	if err := validatePostgresDataDir("wsl:Ubuntu-24.04", `\\wsl.localhost\Ubuntu-24.04\home\dev\.local\share\devkit`,
+		"/home/dev/.local/share/devkit"); err != nil {
+		t.Fatalf("WSL-native path rejected: %v", err)
+	}
+	if err := validatePostgresDataDir("native", hostPath, `D:\dev\devkit\services\postgresql\data`); err != nil {
+		t.Fatalf("native path rejected: %v", err)
+	}
+}
+
+func TestIsWindowsDriveMount(t *testing.T) {
+	cases := map[string]bool{
+		"/mnt/d/dev":  true,
+		"/mnt/D":      true,
+		"/mnt/wsl":    false,
+		"/home/dev":   false,
+		"/mnt/d":      true,
+		"/mnt":        false,
+		"/mnt//dev":   false,
+		"/mnt/dx/dev": false,
+	}
+	for input, want := range cases {
+		if got := isWindowsDriveMount(input); got != want {
+			t.Errorf("isWindowsDriveMount(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
+func TestEnsureWorkspaceTestDatabaseSQLUsesIsolatedDatabase(t *testing.T) {
+	ws := &workspace.Workspace{
+		Database: workspace.DatabaseConfig{
+			DatabaseName: "hxxddk_12345678_demo",
+			Username:     "hxxddk_12345678_demo",
+		},
+	}
+	database := ws.TestDatabaseName()
+	if database != "hxxddk_12345678_demo_test" {
+		t.Fatalf("TestDatabaseName = %q", database)
+	}
+	sql := ensureWorkspaceTestDatabaseSQL(ws, database, `p'ass"word`)
+	for _, fragment := range []string{
+		`CREATE ROLE "hxxddk_12345678_demo" LOGIN PASSWORD 'p''ass"word';`,
+		`quote_ident('hxxddk_12345678_demo_test')`,
+		`quote_ident('hxxddk_12345678_demo')`,
+		`\connect hxxddk_12345678_demo_test`,
+		`GRANT CONNECT, TEMPORARY ON DATABASE "hxxddk_12345678_demo_test" TO "hxxddk_12345678_demo";`,
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("test database SQL missing %q:\n%s", fragment, sql)
+		}
+	}
+	if strings.Contains(sql, "\n\\connect hxxddk_12345678_demo\n") {
+		t.Fatalf("test database SQL must not connect to the development database:\n%s", sql)
+	}
 }

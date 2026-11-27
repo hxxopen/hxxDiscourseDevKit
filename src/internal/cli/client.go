@@ -59,6 +59,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("X-DevKit-Client", "cli")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -147,7 +148,7 @@ func ensureDaemon(ctx context.Context, g Globals) (*Client, error) {
 	return &Client{
 		BaseURL: "http://" + addr,
 		Token:   token,
-		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		HTTP:    &http.Client{Timeout: 120 * time.Second},
 	}, nil
 }
 

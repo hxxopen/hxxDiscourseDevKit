@@ -268,7 +268,7 @@ func cmdProjectCheckout(ctx context.Context, g Globals, args []string) int {
 
 func cmdProjectLogs(ctx context.Context, g Globals, args []string) int {
 	fs, ref := projectFlags("logs")
-	source := fs.String("source", "project", "日志来源 project、init 或 git")
+	source := fs.String("source", "project", "日志来源 project、init、git 或 test")
 	tail := fs.Int("tail", 200, "显示行数")
 	if err := parseFlags(fs, args); err != nil {
 		return 2

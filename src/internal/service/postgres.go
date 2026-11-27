@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -60,10 +61,10 @@ func (m *Manager) postgresStatus(ctx context.Context) Status {
 		return status
 	}
 
-	found, err := m.runtime.FindBinary(ctx, "pg_ctl")
+	found, err := m.runtime.FindComponent(ctx, "postgresql")
 	if err != nil {
 		status.State = StateNotInstalled
-		status.Message = "未找到 pg_ctl；请安装 PostgreSQL 或在版本矩阵中配置路径"
+		status.Message = "未找到 pg_ctl；请在「运行时」页面安装 PostgreSQL，或在版本矩阵中配置路径"
 		return status
 	}
 	status.Path = found.Path
@@ -309,12 +310,44 @@ func (m *Manager) redisEndpointWithOverride(override *ConfigInput) (redisEndpoin
 	return endpoint, nil
 }
 
+// validatePostgresDataDir rejects a data directory that PostgreSQL cannot use.
+// WSL mounts Windows drives through DrvFS at /mnt/<drive>; DrvFS does not
+// enforce Unix modes, so initdb always fails there with "has invalid
+// permissions" even after chmod 0700. Catching it up front gives the user an
+// actionable message instead of an opaque internal error.
+func validatePostgresDataDir(execution, hostPath, execPath string) error {
+	if !runtime.IsWSL(execution) || !isWindowsDriveMount(execPath) {
+		return nil
+	}
+	distro := strings.TrimPrefix(execution, "wsl:")
+	example := fmt.Sprintf(`\\wsl.localhost\%s\home\<用户>\hxxwork\services\postgresql\data`, distro)
+	return fmt.Errorf("%w: 数据目录 %s 位于 Windows 文件系统（WSL 路径 %s）。"+
+		"PostgreSQL 要求数据目录权限为 0700，而 Windows 磁盘挂载（/mnt/*）不保留 Unix 权限，initdb 会拒绝该目录。"+
+		"请把 services.postgresql.data_dir 设置为 WSL2 文件系统路径（例如 %s），"+
+		"或把 storage.data_root 迁移到 WSL2 文件系统后重试",
+		ErrDataDirUnsupported, hostPath, execPath, example)
+}
+
+// isWindowsDriveMount reports whether a WSL path points at an automounted
+// Windows drive, e.g. /mnt/d/work.
+func isWindowsDriveMount(execPath string) bool {
+	rest, ok := strings.CutPrefix(execPath, "/mnt/")
+	if !ok || rest == "" {
+		return false
+	}
+	drive := rest[0]
+	if (drive < 'a' || drive > 'z') && (drive < 'A' || drive > 'Z') {
+		return false
+	}
+	return len(rest) == 1 || rest[1] == '/'
+}
+
 func (m *Manager) startPostgres(ctx context.Context, progress func(int, string)) error {
 	cfg := m.cfg.Get().Services.PostgreSQL
 	if cfg.Mode == "external" {
 		return ErrExternal
 	}
-	pgCtl, err := m.runtime.FindBinary(ctx, "pg_ctl")
+	pgCtl, err := m.runtime.FindComponent(ctx, "postgresql")
 	if err != nil {
 		return fmt.Errorf("%w: 未找到 pg_ctl", ErrNotInstalled)
 	}
@@ -323,11 +356,18 @@ func (m *Manager) startPostgres(ctx context.Context, progress func(int, string))
 		return fmt.Errorf("%w: 未找到 initdb", ErrNotInstalled)
 	}
 	dataDir := m.postgresDataDir(cfg)
+	execDataDir, err := m.resolveConfiguredPath(dataDir, pgCtl.Execution)
+	if err != nil {
+		return err
+	}
+	if err := validatePostgresDataDir(pgCtl.Execution, dataDir, execDataDir); err != nil {
+		return err
+	}
 	serviceDir := m.paths.ServiceDir("postgresql")
 	if err := os.MkdirAll(serviceDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+	if err := m.runtime.EnsureDir(ctx, pgCtl.Execution, dataDir, 0o700); err != nil {
 		return err
 	}
 	logPath := filepath.Join(serviceDir, "postgresql.log")
@@ -359,10 +399,6 @@ func (m *Manager) startPostgres(ctx context.Context, progress func(int, string))
 		}
 	}
 
-	execDataDir, err := m.resolveConfiguredPath(dataDir, pgCtl.Execution)
-	if err != nil {
-		return err
-	}
 	execLogPath, err := m.resolveConfiguredPath(logPath, pgCtl.Execution)
 	if err != nil {
 		return err
@@ -399,10 +435,27 @@ func (m *Manager) startPostgres(ctx context.Context, progress func(int, string))
 		}
 	}
 
+	// Debian/Ubuntu PostgreSQL builds default the Unix socket directory to
+	// /var/run/postgresql, which a non-root DevKit user cannot write. Keep the
+	// socket inside the (WSL-native) data directory instead. This is done after
+	// initdb: the subdirectory would otherwise make the data directory
+	// non-empty and initdb would refuse to run.
+	socketDir := ""
+	if goruntime.GOOS != "windows" || runtime.IsWSL(pgCtl.Execution) {
+		socketHostDir := filepath.Join(dataDir, "sockets")
+		if err := m.runtime.EnsureDir(ctx, pgCtl.Execution, socketHostDir, 0o700); err != nil {
+			return err
+		}
+		socketDir = filepath.ToSlash(filepath.Join(execDataDir, "sockets"))
+	}
+
 	progress(55, "启动 PostgreSQL")
 	runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	options := fmt.Sprintf("-p %d -h %s", cfg.Port, cfg.Host)
+	if socketDir != "" {
+		options += fmt.Sprintf(` -k "%s"`, socketDir)
+	}
 	run, err := m.runtime.RunFound(runCtx, pgCtl, runtime.RunOptions{
 		Args: []string{
 			"-D", execDataDir,
@@ -439,7 +492,7 @@ func (m *Manager) stopPostgres(ctx context.Context, progress func(int, string)) 
 	if cfg.Mode == "external" {
 		return ErrExternal
 	}
-	pgCtl, err := m.runtime.FindBinary(ctx, "pg_ctl")
+	pgCtl, err := m.runtime.FindComponent(ctx, "postgresql")
 	if err != nil {
 		return nil
 	}
@@ -513,17 +566,55 @@ func (m *Manager) EnsureWorkspaceDatabase(ctx context.Context, ws *workspace.Wor
 	return nil
 }
 
+// EnsureWorkspaceTestDatabase creates the per-workspace database used by
+// RAILS_ENV=test. It is separate from the development database so running a
+// plugin test never migrates or cleans development data.
+func (m *Manager) EnsureWorkspaceTestDatabase(ctx context.Context, ws *workspace.Workspace) (string, error) {
+	database := ws.TestDatabaseName()
+	if database == "" {
+		return "", fmt.Errorf("Workspace 数据库名缺失")
+	}
+	status := m.postgresStatus(ctx)
+	if !status.Reachable {
+		return "", fmt.Errorf("%w: %s", ErrNotRunning, status.Message)
+	}
+	cfg := m.cfg.Get().Services.PostgreSQL
+	endpoint, err := m.postgresEndpoint(cfg)
+	if err != nil {
+		return "", err
+	}
+	password, ok := m.secrets.Get(ws.Database.PasswordRef)
+	if !ok || password == "" {
+		return "", fmt.Errorf("Workspace 数据库凭据缺失")
+	}
+	sql := ensureWorkspaceTestDatabaseSQL(ws, database, password)
+	if _, err := m.runPSQL(ctx, endpoint, endpoint.Database, sql); err != nil {
+		return "", err
+	}
+	return database, nil
+}
+
 func (m *Manager) DropWorkspaceDatabase(ctx context.Context, ws *workspace.Workspace) error {
 	cfg := m.cfg.Get().Services.PostgreSQL
 	endpoint, err := m.postgresEndpoint(cfg)
 	if err != nil {
 		return err
 	}
+	databases := []string{ws.Database.DatabaseName}
+	if testDatabase := ws.TestDatabaseName(); testDatabase != "" && testDatabase != ws.Database.DatabaseName {
+		databases = append(databases, testDatabase)
+	}
+	var terminate []string
+	var drop []string
+	for _, database := range databases {
+		terminate = append(terminate, quoteLiteral(database))
+		drop = append(drop, fmt.Sprintf("DROP DATABASE IF EXISTS %s;", quoteIdent(database)))
+	}
 	sql := fmt.Sprintf(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-WHERE datname = %s AND pid <> pg_backend_pid();
-DROP DATABASE IF EXISTS %s;
+WHERE datname IN (%s) AND pid <> pg_backend_pid();
+%s
 DROP ROLE IF EXISTS %s;
-`, quoteLiteral(ws.Database.DatabaseName), quoteIdent(ws.Database.DatabaseName), quoteIdent(ws.Database.Username))
+`, strings.Join(terminate, ", "), strings.Join(drop, "\n"), quoteIdent(ws.Database.Username))
 	_, err = m.runPSQL(ctx, endpoint, endpoint.Database, sql)
 	return err
 }
@@ -572,7 +663,7 @@ func (m *Manager) findPostgresTool(ctx context.Context, name string) (runtime.Fo
 	if found, err := m.runtime.FindBinary(ctx, name); err == nil {
 		return found, nil
 	}
-	pgCtl, err := m.runtime.FindBinary(ctx, "pg_ctl")
+	pgCtl, err := m.runtime.FindComponent(ctx, "postgresql")
 	if err != nil {
 		return runtime.Found{}, err
 	}
@@ -677,8 +768,35 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA public TO %s;
 `,
 		quoteLiteral(ws.Database.Username), role, quoteLiteral(password), role, quoteLiteral(password),
-		ws.Database.DatabaseName, ws.Database.Username, quoteLiteral(ws.Database.DatabaseName),
+		quoteLiteral(ws.Database.DatabaseName), quoteLiteral(ws.Database.Username),
+		quoteLiteral(ws.Database.DatabaseName),
 		database, database, database, role, role)
+}
+
+func ensureWorkspaceTestDatabaseSQL(ws *workspace.Workspace, database, password string) string {
+	role := quoteIdent(ws.Database.Username)
+	quotedDatabase := quoteIdent(database)
+	return fmt.Sprintf(`DO $hxxddk$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = %s) THEN
+    CREATE ROLE %s LOGIN PASSWORD %s;
+  ELSE
+    ALTER ROLE %s WITH LOGIN PASSWORD %s;
+  END IF;
+END
+$hxxddk$;
+SELECT 'CREATE DATABASE ' || quote_ident(%s) || ' OWNER ' || quote_ident(%s)
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = %s)
+\gexec
+\connect %s
+REVOKE ALL ON DATABASE %s FROM PUBLIC;
+GRANT CONNECT, TEMPORARY ON DATABASE %s TO %s;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA public TO %s;
+`,
+		quoteLiteral(ws.Database.Username), role, quoteLiteral(password), role, quoteLiteral(password),
+		quoteLiteral(database), quoteLiteral(ws.Database.Username), quoteLiteral(database),
+		database, quotedDatabase, quotedDatabase, role, role)
 }
 
 func quoteIdent(value string) string {
